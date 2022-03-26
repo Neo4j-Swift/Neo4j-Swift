@@ -17,7 +17,9 @@ let package = Package(
     targets: [
         .target(
             name: "Theo",
-            dependencies: ["Bolt"]),
+            dependencies: ["Bolt"]
+            // , swiftSettings: [ .define("THEO_DEBUG") ]
+        ),
         .testTarget(
             name: "TheoTests",
             dependencies: ["Theo"])

@@ -10,6 +10,8 @@ import Dispatch
 typealias BoltRequest = Bolt.Request
 
 open class BoltClient: ClientProtocol {
+    
+    
     private let hostname: String
     private let port: Int
     private let username: String
@@ -18,6 +20,9 @@ open class BoltClient: ClientProtocol {
     private let connection: Connection
 
     private var currentTransaction: Transaction?
+    
+    // QoS for all *Sync functions
+    private let dispatchQoS: DispatchQoS.QoSClass = .userInitiated
 
     public enum BoltClientError: Error {
         case missingNodeResponse
@@ -145,36 +150,104 @@ open class BoltClient: ClientProtocol {
      - parameter request: The Bolt Request that will be sent to Neo4j
      - parameter completionBlock: Completion result-block that provides a partial QueryResult, or an Error to explain what went wrong
      */
-    public func execute(request: Request, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())? = nil) {
+    public func execute(request: Request) -> EventLoopFuture<QueryResult> {
+        let future = connection.request(request)
         
-        do {
-            guard let promise = try connection.request(request) else {
-                completionBlock?(.failure(BoltClientError.unknownError))
-                return
-            }
+        return future.flatMap { responses -> EventLoopFuture<QueryResult> in
+            let queryResponse = self.parseResponses(responses: responses)
+            return future.eventLoop.makeSucceededFuture(queryResponse)
+        }
+    }
+    
+    public func executeSync(request: Request) -> Result<QueryResult, Error> {
+        let group = DispatchGroup()
+        group.enter()
 
-            promise.whenSuccess { responses in
-                #if THEO_DEBUG
-                print("execute -> success")
-                #endif
-                let queryResponse = self.parseResponses(responses: responses)
-                completionBlock?(.success((true, queryResponse)))
+        var theResult: Result<QueryResult, Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.execute(request: request)
+            do {
+                let result = try future.wait()
+                theResult = .success(result)
+            } catch (let error) {
+                theResult = .failure(error)
             }
-            
-            promise.whenFailure { error in
-                #if THEO_DEBUG
-                print("execute -> failure")
-                #endif
-                completionBlock?(.failure((error)))
-            }
-            
-
-        } catch let error as Response.ResponseError {
-            completionBlock?(.failure(error))
-        } catch let error {
-            print("Unhandled error while executing cypher: \(error.localizedDescription)")
+            group.leave()
         }
         
+        group.wait()
+        return theResult
+    }
+    
+    /**
+     Executes a given request on Neo4j, and pulls the respons data
+
+     Requires an established connection
+
+     Asynchronous, so the function returns straight away. It is not defined what thread the completionblock will run on,
+     so if you need it to run on main thread or another thread, make sure to dispatch to this that thread
+
+     - warning: This function should only be used with requests that expect data to be pulled after they run. Other requests can make Neo4j disconnect with a failure when it is subsequent asked for the result data
+
+     - parameter request: The Bolt Request that will be sent to Neo4j
+     - parameter completionBlock: Completion result-block that provides a complete QueryResult, or an Error to explain what went wrong
+     */
+    public func executeWithResult(request: Request) -> EventLoopFuture<QueryResult> {
+        
+        let promise = connection.request(request)
+        
+        return promise.map { responses -> QueryResult in
+            let queryResponse = self.parseResponses(responses: responses)
+            return queryResponse
+        }
+        .flatMap { queryResult -> EventLoopFuture<QueryResult> in
+            return self.pullAll(partialQueryResult: queryResult)
+        }
+    }
+    
+    public func executeWithResultSync(request: Request) -> Result<QueryResult, Error> {
+        
+        let group = DispatchGroup()
+        group.enter()
+
+        var theResult: Result<QueryResult, Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.executeWithResult(request: request)
+            do {
+                let result = try future.wait()
+                theResult = .success(result)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
+            group.leave()
+        }
+        
+        group.wait()
+        return theResult
+    }
+    
+    /**
+     Executes a given cypher query on Neo4j
+
+     Requires an established connection
+
+     Asynchronous, so the function returns straight away. It is not defined what thread the completionblock will run on,
+     so if you need it to run on main thread or another thread, make sure to dispatch to this that thread
+
+     - warning: Executing a query should be followed by a data pull with the response from Neo4j. Not doing so can lead to Neo4j closing the client connection.
+
+     - parameter query: The Cypher query to be executed
+     - parameter params: The named parameters to be included in the query. All parameter values need to conform to PackProtocol, as this is how they are encoded when sent via Bolt to Neo4j
+     - parameter completionBlock: Completion result-block that provides a partial QueryResult, or an Error to explain what went wrong
+     */
+    public func executeCypher(_ query: String, params: Dictionary<String,PackProtocol>? = nil) -> EventLoopFuture<QueryResult> {
+
+        let cypherRequest = BoltRequest.run(statement: query, parameters: Map(dictionary: params ?? [:]))
+
+        return execute(request: cypherRequest)
+            .flatMap { queryResult -> EventLoopFuture<QueryResult> in
+                return self.pullAll(partialQueryResult: queryResult)
+            }
     }
 
     /**
@@ -191,92 +264,9 @@ open class BoltClient: ClientProtocol {
      - parameter params: The parameters that go with the query
      - parameter completionBlock: Completion result-block that provides a complete QueryResult, or an Error to explain what went wrong
      */
-    public func executeCypherWithResult(_ query: String, params: [String:PackProtocol] = [:], completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())? = nil) {
+    public func executeCypher(_ query: String, params: [String:PackProtocol] = [:]) -> EventLoopFuture<QueryResult> {
         let request = Bolt.Request.run(statement: query, parameters: Map(dictionary: params))
-        self.executeWithResult(request: request, completionBlock: completionBlock)
-    }
-    
-    /**
-     Executes a given request on Neo4j, and pulls the respons data
-
-     Requires an established connection
-
-     Asynchronous, so the function returns straight away. It is not defined what thread the completionblock will run on,
-     so if you need it to run on main thread or another thread, make sure to dispatch to this that thread
-
-     - warning: This function should only be used with requests that expect data to be pulled after they run. Other requests can make Neo4j disconnect with a failure when it is subsequent asked for the result data
-
-     - parameter request: The Bolt Request that will be sent to Neo4j
-     - parameter completionBlock: Completion result-block that provides a complete QueryResult, or an Error to explain what went wrong
-     */
-    public func executeWithResult(request: Request, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())? = nil) {
-        do {
-            guard let promise = try connection.request(request) else {
-                completionBlock?(.failure(BoltClientError.unknownError))
-                return
-            }
-            
-            promise.whenSuccess{ responses in
-                let queryResponse = self.parseResponses(responses: responses)
-                self.pullAll(partialQueryResult: queryResponse) { result in
-                    switch result {
-                    case let .failure(error):
-                        completionBlock?(.failure(error))
-                    case let .success((successResponse, queryResponse)):
-                        if successResponse == false {
-                            completionBlock?(.failure(BoltClientError.queryUnsuccessful))
-                        } else {
-                            completionBlock?(.success((successResponse, queryResponse)))
-                        }
-                    }
-                }
-            }
-            
-            promise.whenFailure { (error) in
-                completionBlock?(.failure(BoltClientError.queryUnsuccessful))
-            }
-        } catch let error as Response.ResponseError {
-            completionBlock?(.failure(error))
-        } catch let error {
-            print("Unhandled error while executing cypher: \(error.localizedDescription)")
-        }
-    }
-
-    /**
-     Executes a given cypher query on Neo4j
-
-     Requires an established connection
-
-     Asynchronous, so the function returns straight away. It is not defined what thread the completionblock will run on,
-     so if you need it to run on main thread or another thread, make sure to dispatch to this that thread
-
-     - warning: Executing a query should be followed by a data pull with the response from Neo4j. Not doing so can lead to Neo4j closing the client connection.
-
-     - parameter query: The Cypher query to be executed
-     - parameter params: The named parameters to be included in the query. All parameter values need to conform to PackProtocol, as this is how they are encoded when sent via Bolt to Neo4j
-     - parameter completionBlock: Completion result-block that provides a partial QueryResult, or an Error to explain what went wrong
-     */
-    public func executeCypher(_ query: String, params: Dictionary<String,PackProtocol>? = nil, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())? = nil) {
-
-        let cypherRequest = BoltRequest.run(statement: query, parameters: Map(dictionary: params ?? [:]))
-
-        execute(request: cypherRequest) { [weak self] result in
-            let isSuccess = (try? result.get().0) ?? false
-            if !isSuccess {
-                if let completionBlock = completionBlock {
-                    completionBlock(result)
-                }
-            } else {
-                if let partialResult = try? result.get().1 {
-                    self?.pullAll(partialQueryResult: partialResult, completionBlock: completionBlock)
-                }
-                /*
-                let request = Request.pullAll()
-                self?.execute(request: request, completionBlock: completionBlock)
-                 */
-            }
-        }
-
+        return self.executeWithResult(request: request)
     }
 
     /**
@@ -299,23 +289,16 @@ open class BoltClient: ClientProtocol {
         // Perform query
         dispatchGroup.enter()
         var partialResult = QueryResult()
-        DispatchQueue.global(qos: .background).async {
-            self.executeCypher(query, params: params) { result in
-                switch result {
-                case let .failure(error):
-                    print("Error: \(error)")
-                    theResult = .failure(error)
-                case let .success((isSuccess, _partialResult)):
-                    if isSuccess == false {
-                        let error = BoltClientError.queryUnsuccessful
-                        theResult = .failure(error)
-                    } else {
-                        theResult = .success(_partialResult) // TODO: hack for now
-                        partialResult = _partialResult
-                    }
-                }
-                dispatchGroup.leave()
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.executeCypher(query, params: params)
+            do {
+                let _partialResult = try future.wait()
+                theResult = .success(_partialResult) // TODO: hack for now
+                partialResult = _partialResult
+            } catch (let error) {
+                theResult = .failure(error)
             }
+            dispatchGroup.leave()
         }
         dispatchGroup.wait()
         if theResult != nil {
@@ -324,29 +307,20 @@ open class BoltClient: ClientProtocol {
 
         // Stream and parse results
         dispatchGroup.enter()
-        DispatchQueue.global(qos: .background).async {
-            self.pullAll(partialQueryResult: partialResult) { result in
-                switch result {
-                case let .failure(error):
-                    print("Error: \(error)")
-                    theResult = .failure(error)
-                case let .success(isSuccess, parsedResponses):
-                    if isSuccess == false {
-                        let error = BoltClientError.queryUnsuccessful
-                        theResult = .failure(error)
-                    } else {
-                        theResult = .success(parsedResponses)
-                    }
-                }
-                dispatchGroup.leave()
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.pullAll(partialQueryResult: partialResult)
+            do {
+                let parsedResponses = try future.wait()
+                theResult = .success(parsedResponses)
+            } catch (let error) {
+                theResult = .failure(error)
             }
+            dispatchGroup.leave()
         }
 
         dispatchGroup.wait()
         return theResult
     }
-
-
 
     private func parseResponses(responses: [Response], result: QueryResult = QueryResult()) -> QueryResult {
         let fields = (responses.flatMap { $0.items } .compactMap { ($0 as? Map)?.dictionary["fields"] }.first as? List)?.items.compactMap { $0 as? String }
@@ -487,48 +461,51 @@ open class BoltClient: ClientProtocol {
         let transaction = Transaction()
         transaction.commitBlock = { succeed in
             if succeed {
-                // self.pullSynchronouslyAndIgnore()
 
                 let commitRequest = BoltRequest.commit()
-                guard let promise = try self.connection.request(commitRequest) else {
-                    let error = BoltClientError.unknownError
-                    throw error
-                    // return
-                }
-
-                promise.whenSuccess { responses in
+                
+                // run commit future
+                #if THEO_DEBUG
+                print("executeAsTransaction - starting transaction commit")
+                #endif
+                let result = self.executeSync(request: commitRequest)
+                switch result {
+                case let .failure(error):
+                    #if THEO_DEBUG
+                    print("executeAsTransaction - commit error: \(error)")
+                    #endif
+                    // let error = BoltClientError.queryUnsuccessful
+                    
+                case .success:
+                    #if THEO_DEBUG
+                    print("executeAsTransaction - commit success")
+                    #endif
                     self.currentTransaction = nil
                     transactionCompleteBlock?(true)
-                    // self.pullSynchronouslyAndIgnore()
-                }
-
-                promise.whenFailure { error in
-                    let error = BoltClientError.queryUnsuccessful
-                    // throw error
                 }
                 
             } else {
 
                 let rollbackRequest = BoltRequest.rollback()
-                guard let promise = try self.connection.request(rollbackRequest) else {
-                    let error = BoltClientError.unknownError
-                    throw error
-                    // return
-                }
                 
-                promise.whenSuccess { responses in
+                // run rollback future
+                #if THEO_DEBUG
+                print("executeAsTransaction - starting transaction rollback")
+                #endif
+                let result = self.executeSync(request: rollbackRequest)
+                switch result {
+                case let .failure(error):
+                    #if THEO_DEBUG
+                    print("executeAsTransaction - rollback error: \(error)")
+                    #endif
+                    transactionCompleteBlock?(false)
+                    
+                case .success:
+                    #if THEO_DEBUG
+                    print("executeAsTransaction - rollback success")
+                    #endif
                     self.currentTransaction = nil
                     transactionCompleteBlock?(false)
-                    // self.pullSynchronouslyAndIgnore()
-                }
-                
-                promise.whenFailure { error in
-                    print("Error rolling back transaction: \(error)")
-                    transactionCompleteBlock?(false)
-                    /*
-                    let error = BoltClientError.queryUnsuccessful
-                    throw error
-                     */
                 }
             }
         }
@@ -536,38 +513,37 @@ open class BoltClient: ClientProtocol {
         currentTransaction = transaction
 
         let beginRequest = BoltRequest.begin(mode: mode)
-        guard let promise = try self.connection.request(beginRequest) else {
-            let error = BoltClientError.unknownError
-            throw error
-            // return
-        }
-
-        promise.whenSuccess { responses in
+        
+        #if THEO_DEBUG
+        print("executeAsTransaction - starting transaction begin")
+        #endif
+        let result = executeSync(request: beginRequest)
+        switch result {
+        case let .failure(error):
+            #if THEO_DEBUG
+            print("executeAsTransaction - transaction begin error: \(error)")
+            #endif
+            // let error = BoltClientError.queryUnsuccessful
+            transaction.commitBlock = { _ in }
             
+        case .success:
+            #if THEO_DEBUG
+            print("executeAsTransaction - transaction begin success")
+            #endif
             try? transactionBlock(transaction)
             #if THEO_DEBUG
-            print("done transaction block??")
+            print("executeAsTransaction - done transaction block")
             #endif
             if transaction.autocommit == true {
                 try? transaction.commitBlock(transaction.succeed)
                 transaction.commitBlock = { _ in }
             }
         }
-        
-        promise.whenFailure { error in
-            print("Error beginning transaction: \(error)")
-            // let error = BoltClientError.queryUnsuccessful
-            transaction.commitBlock = { _ in }
-            // throw error
-        }
     }
     
     public func reset(completionBlock: (() -> ())?) throws {
         let req = BoltRequest.reset()
-        guard let promise = try self.connection.request(req) else {
-            let error = BoltClientError.unknownError
-            throw error
-        }
+        let promise = self.connection.request(req)
         
         promise.whenSuccess { responses in
             if(responses.first?.category != .success) {
@@ -575,12 +551,24 @@ open class BoltClient: ClientProtocol {
             }
             completionBlock?()
         }
-        
         promise.whenFailure { error in
             print("Error resetting connection: \(error)")
             completionBlock?()
         }
-
+        
+        let group = DispatchGroup()
+        group.enter()
+        var theResult: Result<[Response], Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: self.dispatchQoS).async {
+            do {
+                let response = try promise.wait()
+                theResult = .success(response)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
+            group.leave()
+        }
+        group.wait()
     }
     
     public func resetSync() throws {
@@ -594,11 +582,7 @@ open class BoltClient: ClientProtocol {
     
     public func rollback(transaction: Transaction, rollbackCompleteBlock: (() -> ())?) throws {
         let rollbackRequest = BoltRequest.rollback()
-        guard let promise = try self.connection.request(rollbackRequest) else {
-            let error = BoltClientError.unknownError
-            throw error
-            // return
-        }
+        let promise = self.connection.request(rollbackRequest)
         
         promise.whenSuccess { responses in
             self.currentTransaction = nil
@@ -607,66 +591,30 @@ open class BoltClient: ClientProtocol {
             }
             rollbackCompleteBlock?()
         }
-        
         promise.whenFailure { error in
             print("Error rolling back transaction: \(error)")
             rollbackCompleteBlock?()
         }
+        
+        let group = DispatchGroup()
+        group.enter()
+        var theResult: Result<[Response], Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: self.dispatchQoS).async {
+            do {
+                let response = try promise.wait()
+                theResult = .success(response)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
+            group.leave()
+        }
+        group.wait()
 
     }
-
-    public func pullSynchronouslyAndIgnore() {
-        let pullRequest = BoltRequest.pullAll()
-
-        let dispatchGroup = DispatchGroup()
-        dispatchGroup.enter()
-        let q = DispatchQueue(label: "pullSynchronouslyAndIgnore")
-        q.async {
-            guard let promise = try? self.connection.request(pullRequest) else {
-                // let error = BoltClientError.unknownError
-                // throw error
-                dispatchGroup.leave()
-                return
-            }
-
-            #if THEO_DEBUG
-            print("Incoming promise: \(String(describing: promise))")
-            #endif
-            
-            /*promise.whenSuccess { respone in
-                print("yay.....1")
-                dispatchGroup.leave()
-            }
-            
-            promise.whenFailure { error in
-                print("yay.....2")
-                dispatchGroup.leave()
-            }*/
-            
-            promise.whenComplete { result in
-                #if THEO_DEBUG
-                print("yay.....3")
-                #endif
-                dispatchGroup.leave()
-            }
-
-            /*
-            _ = promise.map { result in
-                print("yay.....4")
-                dispatchGroup.leave()
-            }*/
-            /*_ = promise.map { response in
-            // promise.whenSuccess { responses in
-
-                if let bookmark = self.getBookmark() {
-                    self.currentTransaction?.bookmark = bookmark
-                }
-                
-                dispatchGroup.leave()
-            }*/
-        }
-        
-        dispatchGroup.wait()
+    
+    /// Get the current transaction bookmark
+    public func getBookmark() -> String? {
+        return connection.currentTransactionBookmark
     }
 
     /**
@@ -680,51 +628,73 @@ open class BoltClient: ClientProtocol {
      - parameter partialQueryResult: If, for instance when executing the Cypher query, a partial QueryResult was given, pass it in here to have it fully populated in the completion result block
      - parameter completionBlock: Completion result-block that provides either a fully update QueryResult if a QueryResult was given, or a partial QueryResult if no prior QueryResult as given. If a failure has occurred, the Result contains an Error to explain what went wrong
      */
-    public func pullAll(partialQueryResult: QueryResult = QueryResult(), completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())? = nil) {
+    private func pullAll(partialQueryResult: QueryResult = QueryResult()) -> EventLoopFuture<QueryResult> {
         
         let pullRequest = BoltRequest.pullAll()
-        guard let promise = try? self.connection.request(pullRequest) else {
-            // let error = BoltClientError.unknownError
-            // throw error
-            return
-        }
+        let future = self.connection.request(pullRequest)
 
-        promise.whenSuccess { responses in
-
+        return future.flatMap { responses -> EventLoopFuture<QueryResult> in
             let result = self.parseResponses(responses: responses, result: partialQueryResult)
-            completionBlock?(.success((true, result)))
+            return future.eventLoop.makeSucceededFuture(result)
         }
+    }
+    
+    private func pullAllAndIgnore() -> EventLoopFuture<Void> {
         
-        promise.whenFailure { error in
-            completionBlock?(.failure(error))
+        let pullRequest = BoltRequest.pullAll()
+        let future = self.connection.request(pullRequest)
+
+        return future.flatMap { responses -> EventLoopFuture<Void> in
+            return future.eventLoop.makeSucceededVoidFuture()
         }
-
     }
-
-    /// Get the current transaction bookmark
-    public func getBookmark() -> String? {
-        return connection.currentTransactionBookmark
-    }
-
 }
 
 extension BoltClient { // Node functions
+    
+    private func performRequestWithNoReturnNode(request: Request) -> EventLoopFuture<Void> {
+        let future = execute(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<Void> in
+            return future.eventLoop.makeSucceededVoidFuture()
+        }
+    }
+    
+    private func performRequestWithReturnNode(request: Request) -> EventLoopFuture<Node> {
+        
+        let future = execute(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<Node> in
+            return self.pullAll(partialQueryResult: queryResult)
+                .flatMap { queryResult -> EventLoopFuture<Node> in
+                    if let (_, value) = queryResult.nodes.first {
+                        return future.eventLoop.makeSucceededFuture(value)
+                    } else {
+                        return future.eventLoop.makeFailedFuture(BoltClientError.missingNodeResponse)
+                    }
+            }
+        }
+    }
 
-    //MARK: Create
+    // MARK: Create
 
-    public func createAndReturnNode(node: Node, completionBlock: ((Result<Node, Error>) -> ())?) {
+    public func createAndReturnNode(node: Node) -> EventLoopFuture<Node> {
         let request = node.createRequest()
-        performRequestWithReturnNode(request: request, completionBlock: completionBlock)
+        return performRequestWithReturnNode(request: request)
     }
 
     public func createAndReturnNodeSync(node: Node) -> Result<Node, Error> {
-
+        
         let group = DispatchGroup()
         group.enter()
-
+        
         var theResult: Result<Node, Error> = .failure(BoltClientError.unknownError)
-        createAndReturnNode(node: node) { result in
-            theResult = result
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.createAndReturnNode(node: node)
+            do {
+                let node = try future.wait()
+                theResult = .success(node)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
             group.leave()
         }
 
@@ -732,9 +702,12 @@ extension BoltClient { // Node functions
         return theResult
     }
 
-    public func createNode(node: Node, completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func createNode(node: Node) -> EventLoopFuture<Void> {
         let request = node.createRequest(withReturnStatement: false)
-        performRequestWithNoReturnNode(request: request, completionBlock: completionBlock)
+        let future = performRequestWithNoReturnNode(request: request)
+        return future.flatMap { _ in
+            return self.pullAllAndIgnore()
+        }
     }
 
     public func createNodeSync(node: Node) -> Result<Bool, Error> {
@@ -743,42 +716,30 @@ extension BoltClient { // Node functions
         group.enter()
 
         var theResult: Result<Bool, Error> = .failure(BoltClientError.unknownError)
-        createNode(node: node) { result in
-            theResult = result
-            self.pullSynchronouslyAndIgnore()
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.createNode(node: node)
+            do {
+                let _ = try future.wait()
+                theResult = .success(true)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
             group.leave()
         }
-
+        
         group.wait()
         return theResult
+        
     }
 
-    public func createAndReturnNodes(nodes: [Node], completionBlock: ((Result<[Node], Error>) -> ())?) {
+    public func createAndReturnNodes(nodes: [Node]) -> EventLoopFuture<[Node]> {
         let request = nodes.createRequest()
-        execute(request: request) { response in
-            switch response {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, partialQueryResult)):
-                if !isSuccess {
-                    let error = BoltClientError.queryUnsuccessful
-                    completionBlock?(.failure(error))
-                } else {
-                    self.pullAll(partialQueryResult: partialQueryResult) { response in
-                        switch response {
-                        case let .failure(error):
-                            completionBlock?(.failure(error))
-                        case let .success((isSuccess, queryResult)):
-                            if !isSuccess {
-                                let error = BoltClientError.fetchingRecordsUnsuccessful
-                                completionBlock?(.failure(error))
-                            } else {
-                                let nodes: [Node] = queryResult.nodes.map { $0.value }
-                                completionBlock?(.success(nodes))
-                            }
-                        }
-                    }
-                }
+        let future = execute(request: request)
+        return future.flatMap { partialQueryResult -> EventLoopFuture<[Node]> in
+            return self.pullAll(partialQueryResult: partialQueryResult)
+                .flatMap { queryResult -> EventLoopFuture<[Node]> in
+                    let nodes: [Node] = queryResult.nodes.map { $0.value }
+                    return future.eventLoop.makeSucceededFuture(nodes)
             }
         }
     }
@@ -789,10 +750,13 @@ extension BoltClient { // Node functions
         group.enter()
 
         var theResult: Result<[Node], Error> = .failure(BoltClientError.unknownError)
-        createAndReturnNodes(nodes: nodes) { result in
-            theResult = result
-            if(nodes.count != nodes.count) {
-                print("Expected nodes in and nodes out to be equal")
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.createAndReturnNodes(nodes: nodes)
+            do {
+                let nodes = try future.wait()
+                theResult = .success(nodes)
+            } catch (let error) {
+                theResult = .failure(error)
             }
             group.leave()
         }
@@ -801,15 +765,11 @@ extension BoltClient { // Node functions
         return theResult
     }
 
-    public func createNodes(nodes: [Node], completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func createNodes(nodes: [Node]) -> EventLoopFuture<Void> {
         let request = nodes.createRequest(withReturnStatement: false)
-        execute(request: request) { response in
-            switch response {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, _)):
-                completionBlock?(.success(isSuccess))
-            }
+        let future = execute(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<Void> in
+            return future.eventLoop.makeSucceededVoidFuture()
         }
     }
 
@@ -819,57 +779,27 @@ extension BoltClient { // Node functions
         group.enter()
 
         var theResult: Result<Bool, Error> = .failure(BoltClientError.unknownError)
-        createNodes(nodes: nodes) { creationResult in
-            self.pullAll(partialQueryResult: QueryResult()) { queryResult in
-                theResult = creationResult
-                group.leave()
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.createNodes(nodes: nodes)
+            do {
+                let _ = try future.wait()
+                theResult = .success(true)
+            } catch (let error) {
+                theResult = .failure(error)
             }
+            group.leave()
         }
-
-        
         
         group.wait()
         return theResult
     }
 
-    //MARK: Update
-    public func updateAndReturnNode(node: Node, completionBlock: ((Result<Node, Error>) -> ())?) {
+    // MARK: Update
+    
+    public func updateAndReturnNode(node: Node) -> EventLoopFuture<Node> {
 
         let request = node.updateRequest()
-        performRequestWithReturnNode(request: request, completionBlock: completionBlock)
-    }
-
-    private func performRequestWithReturnNode(request: Request, completionBlock: ((Result<Node, Error>) -> ())?) {
-        execute(request: request) { response in
-            switch response {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, partialQueryResult)):
-                if !isSuccess {
-                    let error = BoltClientError.queryUnsuccessful
-                    completionBlock?(.failure(error))
-                } else {
-                    self.pullAll(partialQueryResult: partialQueryResult) { response in
-                        switch response {
-                        case let .failure(error):
-                            completionBlock?(.failure(error))
-                        case let .success((isSuccess, queryResult)):
-                            if !isSuccess {
-                                let error = BoltClientError.fetchingRecordsUnsuccessful
-                                completionBlock?(.failure(error))
-                            } else {
-                                if let (_, node) = queryResult.nodes.first {
-                                    completionBlock?(.success(node))
-                                } else {
-                                    let error = BoltClientError.missingNodeResponse
-                                    completionBlock?(.failure(error))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        return performRequestWithReturnNode(request: request)
     }
 
     public func updateAndReturnNodeSync(node: Node) -> Result<Node, Error> {
@@ -878,8 +808,14 @@ extension BoltClient { // Node functions
         group.enter()
 
         var theResult: Result<Node, Error> = .failure(BoltClientError.unknownError)
-        updateAndReturnNode(node: node) { result in
-            theResult = result
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.updateAndReturnNode(node: node)
+            do {
+                let node = try future.wait()
+                theResult = .success(node)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
             group.leave()
         }
 
@@ -887,21 +823,11 @@ extension BoltClient { // Node functions
         return theResult
     }
 
-    public func updateNode(node: Node, completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func updateNode(node: Node) -> EventLoopFuture<Void> {
 
         let request = node.updateRequest()
-        performRequestWithNoReturnNode(request: request, completionBlock: completionBlock)
-    }
-
-    public func performRequestWithNoReturnNode(request: Request, completionBlock: ((Result<Bool, Error>) -> ())?) {
-
-        execute(request: request) { response in
-            switch response {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, _)):
-                completionBlock?(.success(isSuccess))
-            }
+        return performRequestWithNoReturnNode(request: request).flatMap { _ in
+            return self.pullAllAndIgnore()
         }
     }
 
@@ -911,42 +837,29 @@ extension BoltClient { // Node functions
         group.enter()
 
         var theResult: Result<Bool, Error> = .failure(BoltClientError.unknownError)
-        updateNode(node: node) { result in
-            theResult = result
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.updateNode(node: node)
+            do {
+                let _ = try future.wait()
+                theResult = .success(true)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
             group.leave()
         }
-
+        
         group.wait()
-        self.pullSynchronouslyAndIgnore()
         return theResult
     }
 
-    public func updateAndReturnNodes(nodes: [Node], completionBlock: ((Result<[Node], Error>) -> ())?) {
+    public func updateAndReturnNodes(nodes: [Node]) -> EventLoopFuture<[Node]> {
         let request = nodes.updateRequest()
-        execute(request: request) { response in
-            switch response {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, partialQueryResult)):
-                if !isSuccess {
-                    let error = BoltClientError.queryUnsuccessful
-                    completionBlock?(.failure(error))
-                } else {
-                    self.pullAll(partialQueryResult: partialQueryResult) { response in
-                        switch response {
-                        case let .failure(error):
-                            completionBlock?(.failure(error))
-                        case let .success((isSuccess, queryResult)):
-                            if !isSuccess {
-                                let error = BoltClientError.fetchingRecordsUnsuccessful
-                                completionBlock?(.failure(error))
-                            } else {
-                                let nodes: [Node] = queryResult.nodes.map { $0.value }
-                                completionBlock?(.success(nodes))
-                            }
-                        }
-                    }
-                }
+        let future = execute(request: request)
+        return future.flatMap { partialQueryResult -> EventLoopFuture<[Node]> in
+            return self.pullAll(partialQueryResult: partialQueryResult)
+                .flatMap { queryResult -> EventLoopFuture<[Node]> in
+                    let nodes: [Node] = queryResult.nodes.map { $0.value }
+                    return future.eventLoop.makeSucceededFuture(nodes)
             }
         }
     }
@@ -957,8 +870,14 @@ extension BoltClient { // Node functions
         group.enter()
 
         var theResult: Result<[Node], Error> = .failure(BoltClientError.unknownError)
-        updateAndReturnNodes(nodes: nodes) { result in
-            theResult = result
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.updateAndReturnNodes(nodes: nodes)
+            do {
+                let nodes = try future.wait()
+                theResult = .success(nodes)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
             group.leave()
         }
 
@@ -966,14 +885,12 @@ extension BoltClient { // Node functions
         return theResult
     }
 
-    public func updateNodes(nodes: [Node], completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func updateNodes(nodes: [Node]) -> EventLoopFuture<Void> {
         let request = nodes.updateRequest(withReturnStatement: false)
-        execute(request: request) { response in
-            switch response {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, _)):
-                completionBlock?(.success(isSuccess))
+        let future = execute(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<Void> in
+            return future.eventLoop.makeSucceededVoidFuture().flatMap { _ in
+                return self.pullAllAndIgnore()
             }
         }
     }
@@ -984,22 +901,28 @@ extension BoltClient { // Node functions
         group.enter()
 
         var theResult: Result<Bool, Error> = .failure(BoltClientError.unknownError)
-        DispatchQueue.global(qos: .background).async {
-            self.updateNodes(nodes: nodes) { result in
-                theResult = result
-                self.pullSynchronouslyAndIgnore()
-                group.leave()
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.updateNodes(nodes: nodes)
+            do {
+                let _ = try future.wait()
+                theResult = .success(true)
+            } catch (let error) {
+                theResult = .failure(error)
             }
+            group.leave()
         }
         
         group.wait()
         return theResult
     }
 
-    //MARK: Delete
-    public func deleteNode(node: Node, completionBlock: ((Result<Bool, Error>) -> ())?) {
+    // MARK: Delete
+    
+    public func deleteNode(node: Node) -> EventLoopFuture<Void> {
         let request = node.deleteRequest()
-        performRequestWithNoReturnNode(request: request, completionBlock: completionBlock)
+        return performRequestWithNoReturnNode(request: request).flatMap { _ in
+            return self.pullAllAndIgnore()
+        }
     }
 
     public func deleteNodeSync(node: Node) -> Result<Bool, Error> {
@@ -1008,20 +931,26 @@ extension BoltClient { // Node functions
         group.enter()
 
         var theResult: Result<Bool, Error> = .failure(BoltClientError.unknownError)
-        deleteNode(node: node) { result in
-            theResult = result
-            self.pullSynchronouslyAndIgnore()
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.deleteNode(node: node)
+            do {
+                let _ = try future.wait()
+                theResult = .success(true)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
             group.leave()
         }
 
         group.wait()
         return theResult
-
     }
 
-    public func deleteNodes(nodes: [Node], completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func deleteNodes(nodes: [Node]) -> EventLoopFuture<Void> {
         let request = nodes.deleteRequest()
-        performRequestWithNoReturnNode(request: request, completionBlock: completionBlock)
+        return performRequestWithNoReturnNode(request: request).flatMap { _ in
+            return self.pullAllAndIgnore()
+        }
     }
 
     public func deleteNodesSync(nodes: [Node]) -> Result<Bool, Error> {
@@ -1030,93 +959,179 @@ extension BoltClient { // Node functions
         group.enter()
 
         var theResult: Result<Bool, Error> = .failure(BoltClientError.unknownError)
-        deleteNodes(nodes: nodes) { result in
-            theResult = result
-            self.pullSynchronouslyAndIgnore()
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.deleteNodes(nodes: nodes)
+            do {
+                let _ = try future.wait()
+                theResult = .success(true)
+            } catch (let error) {
+                theResult = .failure(error)
+            }
             group.leave()
         }
 
         group.wait()
         return theResult
     }
-
-    public func nodeBy(id: UInt64, completionBlock: ((Result<Node?, Error>) -> ())?) {
+    
+    // MARK: Nodes
+    
+    public func nodeBy(id: UInt64) -> EventLoopFuture<Node> {
         let query = "MATCH (n) WHERE id(n) = $id RETURN n"
         let params = ["id": Int64(id)]
-
-        // Perform query
-        executeCypher(query, params: params) { result in
-            switch result {
-            case let .failure(error):
-                print("Error: \(error)")
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, parsedResponses)):
-                if isSuccess == false {
-                    let error = BoltClientError.queryUnsuccessful
-                    completionBlock?(.failure(error))
-                } else {
-                    let nodes = parsedResponses.nodes.values
-                    if nodes.count > 1 {
-                        let error = BoltClientError.unexpectedNumberOfResponses
-                        completionBlock?(.failure(error))
-                    } else {
-                        completionBlock?(.success(nodes.first))
-                    }
-                }
-            }
-        }
-    }
-
-    private func queryResultToNodesResult(result: ((Result<(Bool, QueryResult), Error>))) -> (Result<[Node], Error>) {
-        switch(result) {
-        case let .success(value):
-            let (isSuccess, queryResult) = value
-            if isSuccess == false {
-                let error = BoltClientError.queryUnsuccessful
-                return .failure(error)
+        
+        let future = executeCypher(query, params: params)
+        return future.flatMap { queryResult -> EventLoopFuture<Node> in
+            let nodes = queryResult.nodes.values
+            if nodes.count > 1 {
+                return future.eventLoop.makeFailedFuture(BoltClientError.unexpectedNumberOfResponses)
+            } else if let node = nodes.first {
+                return future.eventLoop.makeSucceededFuture(node)
             } else {
-                let nodes: [Node] = Array<Node>(queryResult.nodes.values)
-                return .success(nodes)
+                return future.eventLoop.makeFailedFuture(BoltClientError.unexpectedNumberOfResponses)
             }
-        case let .failure(error):
-            return .failure(error)
         }
     }
+        
+    public func nodeBySync(id: UInt64) -> Result<Node, Error> {
+        let group = DispatchGroup()
+        group.enter()
 
-    public func nodesWith(labels: [String] = [], andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25, completionBlock: ((Result<[Node], Error>) -> ())?) {
+        var theResult: Result<Node, Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.nodeBy(id: id)
+            do {
+                let node = try future.wait()
+                theResult = .success(node)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
+            }
+            group.leave()
+        }
+        
+        group.wait()
+        return theResult
+    }
+
+    public func nodesWith(labels: [String] = [], andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25) -> EventLoopFuture<[Node]> {
         let request = Node.queryFor(labels: labels, andProperties: properties, skip: skip, limit: limit)
-        executeWithResult(request: request) { result in
-            let transformedResult = self.queryResultToNodesResult(result: result)
-            completionBlock?(transformedResult)
+        let future = executeWithResult(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<[Node]> in
+            let nodes: [Node] = Array<Node>(queryResult.nodes.values)
+            return future.eventLoop.makeSucceededFuture(nodes)
         }
     }
+    
+    public func nodesWithSync(labels: [String] = [], andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25) -> Result<[Node], Error> {
+        let group = DispatchGroup()
+        group.enter()
 
-    public func nodesWith(properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25, completionBlock: ((Result<[Node], Error>) -> ())?) {
+        var theResult: Result<[Node], Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.nodesWith(labels: labels, andProperties: properties, skip: skip, limit: limit)
+            do {
+                let nodes = try future.wait()
+                theResult = .success(nodes)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
+            }
+            group.leave()
+        }
+        
+        group.wait()
+        return theResult
+    }
+    
+    public func nodesWith(properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25) -> EventLoopFuture<[Node]> {
         let request = Node.queryFor(labels: [], andProperties: properties, skip: skip, limit: limit)
-        executeWithResult(request: request) { result in
-            let transformedResult = self.queryResultToNodesResult(result: result)
-            completionBlock?(transformedResult)
+        let future = executeWithResult(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<[Node]> in
+            let nodes: [Node] = Array<Node>(queryResult.nodes.values)
+            return future.eventLoop.makeSucceededFuture(nodes)
         }
     }
+    
+    public func nodesWithSync(properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25) -> Result<[Node], Error> {
+        let group = DispatchGroup()
+        group.enter()
 
-    public func nodesWith(label: String, andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25, completionBlock: ((Result<[Node], Error>) -> ())?) {
-        let request = Node.queryFor(labels: [label], andProperties: properties, skip: skip, limit: limit)
-        executeWithResult(request: request) { result in
-            let transformedResult = self.queryResultToNodesResult(result: result)
-            completionBlock?(transformedResult)
+        var theResult: Result<[Node], Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.nodesWith(properties: properties, skip: skip, limit: limit)
+            do {
+                let nodes = try future.wait()
+                theResult = .success(nodes)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
+            }
+            group.leave()
         }
+        
+        group.wait()
+        return theResult
+    }
+    
+    public func nodesWith(label: String, andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25) -> EventLoopFuture<[Node]> {
+        let request = Node.queryFor(labels: [label], andProperties: properties, skip: skip, limit: limit)
+        let future = executeWithResult(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<[Node]> in
+            let nodes: [Node] = Array<Node>(queryResult.nodes.values)
+            return future.eventLoop.makeSucceededFuture(nodes)
+        }
+    }
+    
+    public func nodesWithSync(label: String, andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25) -> Result<[Node], Error> {
+        let group = DispatchGroup()
+        group.enter()
+
+        var theResult: Result<[Node], Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.nodesWith(label: label, andProperties: properties, skip: skip, limit: limit)
+            do {
+                let nodes = try future.wait()
+                theResult = .success(nodes)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
+            }
+            group.leave()
+        }
+        
+        group.wait()
+        return theResult
     }
 
 }
 
 extension BoltClient { // Relationship functions
+    
+    private func performRequestWithReturnRelationship(request: Request) -> EventLoopFuture<Relationship> {
+        
+        let future = execute(request: request)
+        return future.flatMap { partialQueryResult -> EventLoopFuture<Relationship> in
+            self.pullAll(partialQueryResult: partialQueryResult)
+                .flatMap { queryResult -> EventLoopFuture<Relationship> in
+                    if let (_, relationship) = queryResult.relationships.first {
+                        return future.eventLoop.makeSucceededFuture(relationship)
+                    } else {
+                        return future.eventLoop.makeFailedFuture(BoltClientError.missingRelationshipResponse)
+                    }
+            }
+        }
+    }
+    
+    private func performRequestWithNoReturnRelationship(request: Request) -> EventLoopFuture<Void> {
+        let future = execute(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<Void> in
+            return future.eventLoop.makeSucceededVoidFuture()
+        }
+    }
 
-    // Create
+    // MARK: Relate
 
-    public func relate(node: Node, to: Node, type: String, properties: [String:PackProtocol] = [:], completionBlock: ((Result<Relationship, Error>) -> ())?) {
+    public func relate(node: Node, to: Node, type: String, properties: [String:PackProtocol] = [:]) -> EventLoopFuture<Relationship> {
         let relationship = Relationship(fromNode: node, toNode: to, type: type, direction: .from, properties: properties)
         let request = relationship.createRequest()
-        performRequestWithReturnRelationship(request: request, completionBlock: completionBlock)
+        return performRequestWithReturnRelationship(request: request)
     }
 
     public func relateSync(node: Node, to: Node, type: String, properties: [String:PackProtocol] = [:]) -> Result<Relationship, Error> {
@@ -1124,168 +1139,105 @@ extension BoltClient { // Relationship functions
         group.enter()
 
         var theResult: Result<Relationship, Error> = .failure(BoltClientError.unknownError)
-        relate(node: node, to: to, type: type, properties: properties) { result in
-            theResult = result
-            group.leave()
-        }
-
-        group.wait()
-        return theResult
-    }
-
-    public func createAndReturnRelationshipsSync(relationships: [Relationship]) -> Result<[Relationship], Error> {
-        let request = relationships.createRequest(withReturnStatement: true)
-        let group = DispatchGroup()
-        group.enter()
-        var theResult: Result<[Relationship], Error> = .failure(BoltClientError.unknownError)
-        executeWithResult(request: request) { result in
-            switch result {
-            case let .failure(error):
-                theResult = .failure(error)
-            case let .success((isSuccess, queryResult)):
-                if isSuccess == false {
-                    let error = BoltClientError.queryUnsuccessful
-                    theResult = .failure(error)
-                } else {
-                    let relationships: [Relationship] = Array<Relationship>(queryResult.relationships.values)
-                    theResult = .success(relationships)
-                }
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.relate(node: node, to: to, type: type, properties: properties)
+            do {
+                let relationship = try future.wait()
+                theResult = .success(relationship)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
             }
             group.leave()
         }
-        group.wait()
 
+        group.wait()
         return theResult
     }
-
-    public func createAndReturnRelationships(relationships: [Relationship], completionBlock: ((Result<[Relationship], Error>) -> ())?) {
+    
+    // MARK: Relationships
+    
+    public func createAndReturnRelationships(relationships: [Relationship]) -> EventLoopFuture<[Relationship]> {
         let request = relationships.createRequest(withReturnStatement: true)
-        executeWithResult(request: request) { result in
-            switch result {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, queryResult)):
-                if isSuccess == false {
-                    let error = BoltClientError.queryUnsuccessful
-                    completionBlock?(.failure(error))
-                } else {
-                    let relationships: [Relationship] = Array<Relationship>(queryResult.relationships.values)
-                    completionBlock?(.success(relationships))
-                }
+        let future = executeWithResult(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<[Relationship]> in
+            let relationships: [Relationship] = Array<Relationship>(queryResult.relationships.values)
+            return future.eventLoop.makeSucceededFuture(relationships)
+        }
+    }
+
+    public func createAndReturnRelationshipsSync(relationships: [Relationship]) -> Result<[Relationship], Error> {
+        let group = DispatchGroup()
+        group.enter()
+        
+        var theResult: Result<[Relationship], Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.createAndReturnRelationships(relationships: relationships)
+            do {
+                let relationship = try future.wait()
+                theResult = .success(relationship)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
+            }
+            group.leave()
+        }
+
+        group.wait()
+        return theResult
+    }
+    
+    public func createAndReturnRelationship(relationship: Relationship) -> EventLoopFuture<Relationship> {
+        let request = relationship.createRequest(withReturnStatement: true)
+        let future = executeWithResult(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<Relationship> in
+            if queryResult.relationships.count == 0 {
+                return future.eventLoop.makeFailedFuture(BoltClientError.unknownError)
+            } else if queryResult.relationships.count == 1, let first = queryResult.relationships.values.first {
+                return future.eventLoop.makeSucceededFuture(first)
+            } else {
+                print("createAndReturnRelationship() unexpectantly returned more than one relationship, returning first")
+                return future.eventLoop.makeFailedFuture(BoltClientError.unknownError)
             }
         }
     }
 
     public func createAndReturnRelationshipSync(relationship: Relationship) -> Result<Relationship, Error> {
-        let request = relationship.createRequest(withReturnStatement: true)
         let group = DispatchGroup()
         group.enter()
+        
         var theResult: Result<Relationship, Error> = .failure(BoltClientError.unknownError)
-        executeWithResult(request: request) { result in
-            switch result {
-            case let .failure(error):
-                theResult = .failure(error)
-            case let .success((isSuccess, queryResult)):
-                if isSuccess == false {
-                    let error = BoltClientError.queryUnsuccessful
-                    theResult = .failure(error)
-                } else {
-                    if queryResult.relationships.count == 0 {
-                        let error = BoltClientError.unknownError
-                        theResult = .failure(error)
-                    } else if queryResult.relationships.count > 1 {
-                        print("createAndReturnRelationshipSync() unexpectantly returned more than one relationship, returning first")
-                        let relationship = queryResult.relationships.values.first!
-                        theResult = .success(relationship)
-                    } else {
-                        let relationship = queryResult.relationships.values.first!
-                        theResult = .success(relationship)
-                    }
-                }
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.createAndReturnRelationship(relationship: relationship)
+            do {
+                let relationship = try future.wait()
+                theResult = .success(relationship)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
             }
             group.leave()
         }
+        
         group.wait()
-
         return theResult
     }
 
-    public func createAndReturnRelationship(relationship: Relationship, completionBlock: ((Result<Relationship, Error>) -> ())?) {
-        let request = relationship.createRequest(withReturnStatement: true)
-        executeWithResult(request: request) { result in
-            switch result {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, queryResult)):
-                if isSuccess == false {
-                    let error = BoltClientError.queryUnsuccessful
-                    completionBlock?(.failure(error))
-                } else {
-                    if queryResult.relationships.count == 0 {
-                        let error = BoltClientError.unknownError
-                        completionBlock?(.failure(error))
-                    } else if queryResult.relationships.count > 1 {
-                        print("createAndReturnRelationship() unexpectantly returned more than one relationship, returning first")
-                        let relationship = queryResult.relationships.values.first!
-                        completionBlock?(.success(relationship))
-                    } else {
-                        let relationship = queryResult.relationships.values.first!
-                        completionBlock?(.success(relationship))
-                    }
-                }
-            }
-        }
-    }
-
-
-    //MARK: Update
-    public func updateAndReturnRelationship(relationship: Relationship, completionBlock: ((Result<Relationship, Error>) -> ())?) {
-
+    public func updateAndReturnRelationship(relationship: Relationship) -> EventLoopFuture<Relationship> {
         let request = relationship.updateRequest()
-        performRequestWithReturnRelationship(request: request, completionBlock: completionBlock)
-    }
-
-    private func performRequestWithReturnRelationship(request: Request, completionBlock: ((Result<Relationship, Error>) -> ())?) {
-        execute(request: request) { response in
-            switch response {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, partialQueryResult)):
-                if !isSuccess {
-                    let error = BoltClientError.queryUnsuccessful
-                    completionBlock?(.failure(error))
-                } else {
-                    self.pullAll(partialQueryResult: partialQueryResult) { response in
-                        switch response {
-                        case let .failure(error):
-                            completionBlock?(.failure(error))
-                        case let .success((isSuccess, queryResult)):
-                            if !isSuccess {
-                                let error = BoltClientError.fetchingRecordsUnsuccessful
-                                completionBlock?(.failure(error))
-                            } else {
-                                if let (_, relationship) = queryResult.relationships.first {
-                                    completionBlock?(.success(relationship))
-                                } else {
-                                    let error = BoltClientError.missingRelationshipResponse
-                                    completionBlock?(.failure(error))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        return performRequestWithReturnRelationship(request: request)
     }
 
     public func updateAndReturnRelationshipSync(relationship: Relationship) -> Result<Relationship, Error> {
-
         let group = DispatchGroup()
         group.enter()
 
         var theResult: Result<Relationship, Error> = .failure(BoltClientError.unknownError)
-        updateAndReturnRelationship(relationship: relationship) { result in
-            theResult = result
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.updateAndReturnRelationship(relationship: relationship)
+            do {
+                let relationship = try future.wait()
+                theResult = .success(relationship)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
+            }
             group.leave()
         }
 
@@ -1293,22 +1245,10 @@ extension BoltClient { // Relationship functions
         return theResult
     }
 
-    public func updateRelationship(relationship: Relationship, completionBlock: ((Result<Bool, Error>) -> ())?) {
-
+    public func updateRelationship(relationship: Relationship) -> EventLoopFuture<Void> {
         let request = relationship.updateRequest()
-        performRequestWithNoReturnRelationship(request: request, completionBlock: completionBlock)
-    }
-
-    public func performRequestWithNoReturnRelationship(request: Request, completionBlock: ((Result<Bool, Error>) -> ())?) {
-
-        execute(request: request) { response in
-            switch response {
-            case let .failure(error):
-                completionBlock?(.failure(error))
-            case let .success((isSuccess, _)):
-                self.pullSynchronouslyAndIgnore()
-                completionBlock?(.success(isSuccess))
-            }
+        return performRequestWithNoReturnRelationship(request: request).flatMap { _ in
+            return self.pullAllAndIgnore()
         }
     }
 
@@ -1318,8 +1258,14 @@ extension BoltClient { // Relationship functions
         group.enter()
 
         var theResult: Result<Bool, Error> = .failure(BoltClientError.unknownError)
-        updateRelationship(relationship: relationship) { result in
-            theResult = result
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.updateRelationship(relationship: relationship)
+            do {
+                let _ = try future.wait()
+                theResult = .success(true)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
+            }
             group.leave()
         }
 
@@ -1327,6 +1273,7 @@ extension BoltClient { // Relationship functions
         return theResult
     }
 
+    // TODO: Determine if these are needed going forward
     /*
     public func updateAndReturnRelationships(relationships: [Relationship], completionBlock: ((Result<[Relationship], Error>) -> ())?) {
         let request = relationships.updateRequest()
@@ -1400,28 +1347,32 @@ extension BoltClient { // Relationship functions
         return theResult
     }*/
 
-    //MARK: Delete
-    public func deleteRelationship(relationship: Relationship, completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func deleteRelationship(relationship: Relationship) -> EventLoopFuture<Void> {
         let request = relationship.deleteRequest()
-        performRequestWithNoReturnRelationship(request: request, completionBlock: completionBlock)
+        return performRequestWithNoReturnRelationship(request: request)
     }
 
     public func deleteRelationshipSync(relationship: Relationship) -> Result<Bool, Error> {
-
         let group = DispatchGroup()
         group.enter()
 
         var theResult: Result<Bool, Error> = .failure(BoltClientError.unknownError)
-        deleteRelationship(relationship: relationship) { result in
-            theResult = result
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.deleteRelationship(relationship: relationship)
+            do {
+                let _ = try future.wait()
+                theResult = .success(true)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
+            }
             group.leave()
         }
 
         group.wait()
         return theResult
-
     }
 
+    // TODO: Determine if these are needed going forward
     /*
     public func deleteRelationships(relationships: [Relationship], completionBlock: ((Result<[Bool], Error>) -> ())?) {
         let request = relationships.deleteRequest()
@@ -1442,29 +1393,35 @@ extension BoltClient { // Relationship functions
         group.wait()
         return theResult
     }*/
-
-    private func queryResultToRelationshipResult(result: ((Result<(Bool, QueryResult), Error>))) -> (Result<[Relationship], Error>) {
-        switch(result) {
-        case let .success(value):
-            let (isSuccess, queryResult) = value
-            if isSuccess == false {
-                let error = BoltClientError.queryUnsuccessful
-                return .failure(error)
-            } else {
-                let nodes: [Relationship] = Array<Relationship>(queryResult.relationships.values)
-                return .success(nodes)
-            }
-        case let .failure(error):
-            return .failure(error)
+    
+    public func relationshipsWith(type: String, andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25) -> EventLoopFuture<[Relationship]> {
+        let request = Relationship.queryFor(type: type, andProperties: properties, skip: skip, limit: limit)
+        let future = executeWithResult(request: request)
+        return future.flatMap { queryResult -> EventLoopFuture<[Relationship]> in
+            let nodes: [Relationship] = Array<Relationship>(queryResult.relationships.values)
+            return future.eventLoop.makeSucceededFuture(nodes)
         }
     }
+    
+    public func relationshipsWithSync(type: String, andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25) -> Result<[Relationship], Error> {
+        let group = DispatchGroup()
+        group.enter()
 
-    public func relationshipsWith(type: String, andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25, completionBlock: ((Result<[Relationship], Error>) -> ())?) {
-        let request = Relationship.queryFor(type: type, andProperties: properties, skip: skip, limit: limit)
-        executeWithResult(request: request) { result in
-            let transformedResult = self.queryResultToRelationshipResult(result: result)
-            completionBlock?(transformedResult)
+        var theResult: Result<[Relationship], Error> = .failure(BoltClientError.unknownError)
+        DispatchQueue.global(qos: dispatchQoS).async {
+            let future = self.relationshipsWith(type: type, andProperties: properties, skip: skip, limit: limit)
+            do {
+                let relationships = try future.wait()
+                theResult = .success(relationships)
+            } catch {
+                theResult = .failure(BoltClientError.unknownError)
+            }
+            group.leave()
         }
+
+        group.wait()
+        return theResult
+        
     }
 
 }

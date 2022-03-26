@@ -1,6 +1,7 @@
 import Foundation
 import PackStream
 import Bolt
+import NIO
 
 private class ClientInstanceWithProperties {
     let client: ClientProtocol
@@ -21,6 +22,7 @@ private struct InMemoryClientConfiguration: ClientConfigurationProtocol {
 }
 
 public class BoltPoolClient: ClientProtocol {
+    
     
     private var clients: [ClientInstanceWithProperties]
     private let clientSemaphore: DispatchSemaphore
@@ -130,33 +132,37 @@ extension BoltPoolClient {
         client.disconnect()
     }
     
-    public func execute(request: Request, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())?) {
+    public func execute(request: Request) -> EventLoopFuture<QueryResult> {
         let client = self.getClient()
         
         defer { release(client) }
-        client.execute(request: request, completionBlock: completionBlock)
+        return client.execute(request: request)
     }
     
-    public func executeWithResult(request: Request, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())?) {
+    public func executeWithResult(request: Request) -> EventLoopFuture<QueryResult> {
         let client = self.getClient()
         
         defer { release(client) }
-        client.executeWithResult(request: request, completionBlock: completionBlock)
+        return client.executeWithResult(request: request)
     }
     
-    public func executeCypher(_ query: String, params: Dictionary<String, PackProtocol>?, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())?) {
-        let client = self.getClient()
-        defer { release(client) }
-        client.executeCypher(query, params: params, completionBlock: completionBlock)
-    }
-    
-    public func executeCypherWithResult(_ query: String, params: [String:PackProtocol] = [:], completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())? = nil) {
+    public func executeWithResultSync(request: Request) -> Result<QueryResult, Error> {
         let client = self.getClient()
         
-        client.executeCypherWithResult(query, params: params) { result in
-            self.release(client)
-            completionBlock?(result)
-        }
+        defer { release(client) }
+        return client.executeWithResultSync(request: request)
+    }
+    
+    public func executeCypher(_ query: String, params: Dictionary<String, PackProtocol>?) -> EventLoopFuture<QueryResult> {
+        let client = self.getClient()
+        defer { release(client) }
+        return client.executeCypher(query, params: params)
+    }
+    
+    public func executeCypher(_ query: String, params: [String:PackProtocol] = [:]) -> EventLoopFuture<QueryResult>  {
+        let client = self.getClient()
+        defer { release(client) }
+        return client.executeCypher(query, params: params)
     }
     
     public func executeCypherSync(_ query: String, params: Dictionary<String, PackProtocol>?) -> (Result<QueryResult, Error>) {
@@ -188,22 +194,18 @@ extension BoltPoolClient {
         try client.rollback(transaction: transaction, rollbackCompleteBlock: rollbackCompleteBlock)
     }
     
-    public func pullAll(partialQueryResult: QueryResult, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())?) {
-        let client = self.getClient()
-        defer { release(client) }
-        client.pullAll(partialQueryResult: partialQueryResult, completionBlock: completionBlock)
-    }
-    
     public func getBookmark() -> String? {
         let client = self.getClient()
         defer { release(client) }
         return client.getBookmark()
     }
     
-    public func createAndReturnNode(node: Node, completionBlock: ((Result<Node, Error>) -> ())?) {
+    // MARK: Create
+    
+    public func createAndReturnNode(node: Node) -> EventLoopFuture<Node> {
         let client = self.getClient()
         defer { release(client) }
-        client.createAndReturnNode(node: node, completionBlock: completionBlock)
+        return client.createAndReturnNode(node: node)
     }
     
     public func createAndReturnNodeSync(node: Node) -> Result<Node, Error> {
@@ -212,10 +214,10 @@ extension BoltPoolClient {
         return client.createAndReturnNodeSync(node: node)
     }
     
-    public func createNode(node: Node, completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func createNode(node: Node) -> EventLoopFuture<Void> {
         let client = self.getClient()
         defer { release(client) }
-        client.createNode(node: node, completionBlock: completionBlock)
+        return client.createNode(node: node)
     }
     
     public func createNodeSync(node: Node) -> Result<Bool, Error> {
@@ -224,10 +226,10 @@ extension BoltPoolClient {
         return client.createNodeSync(node: node)
     }
     
-    public func createAndReturnNodes(nodes: [Node], completionBlock: ((Result<[Node], Error>) -> ())?) {
+    public func createAndReturnNodes(nodes: [Node]) -> EventLoopFuture<[Node]> {
         let client = self.getClient()
         defer { release(client) }
-        client.createAndReturnNodes(nodes: nodes, completionBlock: completionBlock)
+        return client.createAndReturnNodes(nodes: nodes)
     }
     
     public func createAndReturnNodesSync(nodes: [Node]) -> Result<[Node], Error> {
@@ -237,10 +239,10 @@ extension BoltPoolClient {
         return res
     }
     
-    public func createNodes(nodes: [Node], completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func createNodes(nodes: [Node]) -> EventLoopFuture<Void> {
         let client = self.getClient()
         defer { release(client) }
-        client.createNodes(nodes: nodes, completionBlock: completionBlock)
+        return client.createNodes(nodes: nodes)
     }
     
     public func createNodesSync(nodes: [Node]) -> Result<Bool, Error> {
@@ -249,10 +251,12 @@ extension BoltPoolClient {
         return client.createNodesSync(nodes: nodes)
     }
     
-    public func updateAndReturnNode(node: Node, completionBlock: ((Result<Node, Error>) -> ())?) {
+    // MARK: Update
+    
+    public func updateAndReturnNode(node: Node) -> EventLoopFuture<Node> {
         let client = self.getClient()
         defer { release(client) }
-        client.updateAndReturnNode(node: node, completionBlock: completionBlock)
+        return client.updateAndReturnNode(node: node)
     }
     
     public func updateAndReturnNodeSync(node: Node) -> Result<Node, Error> {
@@ -261,16 +265,10 @@ extension BoltPoolClient {
         return client.updateAndReturnNodeSync(node: node)
     }
     
-    public func updateNode(node: Node, completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func updateNode(node: Node) -> EventLoopFuture<Void> {
         let client = self.getClient()
         defer { release(client) }
-        client.updateNode(node: node, completionBlock: completionBlock)
-    }
-    
-    public func performRequestWithNoReturnNode(request: Request, completionBlock: ((Result<Bool, Error>) -> ())?) {
-        let client = self.getClient()
-        defer { release(client) }
-        client.performRequestWithNoReturnNode(request: request, completionBlock: completionBlock)
+        return client.updateNode(node: node)
     }
     
     public func updateNodeSync(node: Node) -> Result<Bool, Error> {
@@ -279,10 +277,10 @@ extension BoltPoolClient {
         return client.updateNodeSync(node: node)
     }
     
-    public func updateAndReturnNodes(nodes: [Node], completionBlock: ((Result<[Node], Error>) -> ())?) {
+    public func updateAndReturnNodes(nodes: [Node]) -> EventLoopFuture<[Node]> {
         let client = self.getClient()
         defer { release(client) }
-        client.updateAndReturnNodes(nodes: nodes, completionBlock: completionBlock)
+        return client.updateAndReturnNodes(nodes: nodes)
     }
     
     public func updateAndReturnNodesSync(nodes: [Node]) -> Result<[Node], Error> {
@@ -291,10 +289,10 @@ extension BoltPoolClient {
         return client.updateAndReturnNodesSync(nodes: nodes)
     }
     
-    public func updateNodes(nodes: [Node], completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func updateNodes(nodes: [Node]) -> EventLoopFuture<Void> {
         let client = self.getClient()
         defer { release(client) }
-        client.updateNodes(nodes: nodes, completionBlock: completionBlock)
+        return client.updateNodes(nodes: nodes)
     }
     
     public func updateNodesSync(nodes: [Node]) -> Result<Bool, Error> {
@@ -303,10 +301,12 @@ extension BoltPoolClient {
         return client.updateNodesSync(nodes: nodes)
     }
     
-    public func deleteNode(node: Node, completionBlock: ((Result<Bool, Error>) -> ())?) {
+    // MARK: Delete
+    
+    public func deleteNode(node: Node) -> EventLoopFuture<Void> {
         let client = self.getClient()
         defer { release(client) }
-        client.deleteNode(node: node, completionBlock: completionBlock)
+        return client.deleteNode(node: node)
     }
     
     public func deleteNodeSync(node: Node) -> Result<Bool, Error> {
@@ -315,10 +315,10 @@ extension BoltPoolClient {
         return client.deleteNodeSync(node: node)
     }
     
-    public func deleteNodes(nodes: [Node], completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func deleteNodes(nodes: [Node]) -> EventLoopFuture<Void> {
         let client = self.getClient()
         defer { release(client) }
-        client.deleteNodes(nodes: nodes, completionBlock: completionBlock)
+        return client.deleteNodes(nodes: nodes)
     }
     
     public func deleteNodesSync(nodes: [Node]) -> Result<Bool, Error> {
@@ -327,34 +327,62 @@ extension BoltPoolClient {
         return client.deleteNodesSync(nodes: nodes)
     }
     
-    public func nodeBy(id: UInt64, completionBlock: ((Result<Node?, Error>) -> ())?) {
+    // MARK: Nodes
+    
+    public func nodeBy(id: UInt64) -> EventLoopFuture<Node> {
         let client = self.getClient()
         defer { release(client) }
-        client.nodeBy(id: id, completionBlock: completionBlock)
+        return client.nodeBy(id: id)
     }
     
-    public func nodesWith(labels: [String], andProperties properties: [String : PackProtocol], skip: UInt64, limit: UInt64, completionBlock: ((Result<[Node], Error>) -> ())?) {
+    public func nodeBySync(id: UInt64) -> Result<Node, Error> {
         let client = self.getClient()
         defer { release(client) }
-        client.nodesWith(labels: labels, andProperties: properties, skip: skip, limit: limit, completionBlock: completionBlock)
+        return client.nodeBySync(id: id)
     }
     
-    public func nodesWith(properties: [String : PackProtocol], skip: UInt64, limit: UInt64, completionBlock: ((Result<[Node], Error>) -> ())?) {
+    public func nodesWith(labels: [String], andProperties properties: [String : PackProtocol], skip: UInt64, limit: UInt64) -> EventLoopFuture<[Node]> {
         let client = self.getClient()
         defer { release(client) }
-        client.nodesWith(properties: properties, skip: skip, limit: limit, completionBlock: completionBlock)
+        return client.nodesWith(labels: labels, andProperties: properties, skip: skip, limit: limit)
     }
     
-    public func nodesWith(label: String, andProperties properties: [String : PackProtocol], skip: UInt64, limit: UInt64, completionBlock: ((Result<[Node], Error>) -> ())?) {
+    public func nodesWithSync(labels: [String], andProperties properties: [String : PackProtocol], skip: UInt64, limit: UInt64) ->Result<[Node], Error> {
         let client = self.getClient()
         defer { release(client) }
-        client.nodesWith(label: label, andProperties: properties, skip: skip, limit: limit, completionBlock: completionBlock)
+        return client.nodesWithSync(labels: labels, andProperties: properties, skip: skip, limit: limit)
     }
     
-    public func relate(node: Node, to: Node, type: String, properties: [String : PackProtocol], completionBlock: ((Result<Relationship, Error>) -> ())?) {
+    public func nodesWith(properties: [String : PackProtocol], skip: UInt64, limit: UInt64) -> EventLoopFuture<[Node]> {
         let client = self.getClient()
         defer { release(client) }
-        client.relate(node: node, to: to, type: type, properties: properties, completionBlock: completionBlock)
+        return client.nodesWith(properties: properties, skip: skip, limit: limit)
+    }
+    
+    public func nodesWithSync(properties: [String : PackProtocol], skip: UInt64, limit: UInt64) -> Result<[Node], Error> {
+        let client = self.getClient()
+        defer { release(client) }
+        return client.nodesWithSync(properties: properties, skip: skip, limit: limit)
+    }
+    
+    public func nodesWith(label: String, andProperties properties: [String : PackProtocol], skip: UInt64, limit: UInt64) -> EventLoopFuture<[Node]> {
+        let client = self.getClient()
+        defer { release(client) }
+        return client.nodesWith(label: label, andProperties: properties, skip: skip, limit: limit)
+    }
+    
+    public func nodesWithSync(label: String, andProperties properties: [String : PackProtocol], skip: UInt64, limit: UInt64) -> Result<[Node], Error> {
+        let client = self.getClient()
+        defer { release(client) }
+        return client.nodesWithSync(label: label, andProperties: properties, skip: skip, limit: limit)
+    }
+    
+    // MARK: Relate
+    
+    public func relate(node: Node, to: Node, type: String, properties: [String : PackProtocol]) -> EventLoopFuture<Relationship> {
+        let client = self.getClient()
+        defer { release(client) }
+        return client.relate(node: node, to: to, type: type, properties: properties)
     }
     
     public func relateSync(node: Node, to: Node, type: String, properties: [String : PackProtocol]) -> Result<Relationship, Error> {
@@ -363,16 +391,24 @@ extension BoltPoolClient {
         return client.relateSync(node: node, to: to, type: type, properties: properties)
     }
     
+    // MARK: Relationships
+    
+    public func createAndReturnRelationships(relationships: [Relationship]) -> EventLoopFuture<[Relationship]> {
+        let client = self.getClient()
+        defer { release(client) }
+        return client.createAndReturnRelationships(relationships: relationships)
+    }
+    
     public func createAndReturnRelationshipsSync(relationships: [Relationship]) -> Result<[Relationship], Error> {
         let client = self.getClient()
         defer { release(client) }
         return client.createAndReturnRelationshipsSync(relationships: relationships)
     }
     
-    public func createAndReturnRelationships(relationships: [Relationship], completionBlock: ((Result<[Relationship], Error>) -> ())?) {
+    public func createAndReturnRelationship(relationship: Relationship) -> EventLoopFuture<Relationship> {
         let client = self.getClient()
         defer { release(client) }
-        client.createAndReturnRelationships(relationships: relationships, completionBlock: completionBlock)
+        return client.createAndReturnRelationship(relationship: relationship)
     }
     
     public func createAndReturnRelationshipSync(relationship: Relationship) -> Result<Relationship, Error> {
@@ -381,16 +417,10 @@ extension BoltPoolClient {
         return client.createAndReturnRelationshipSync(relationship: relationship)
     }
     
-    public func createAndReturnRelationship(relationship: Relationship, completionBlock: ((Result<Relationship, Error>) -> ())?) {
+    public func updateAndReturnRelationship(relationship: Relationship) -> EventLoopFuture<Relationship> {
         let client = self.getClient()
         defer { release(client) }
-        client.createAndReturnRelationship(relationship: relationship, completionBlock: completionBlock)
-    }
-    
-    public func updateAndReturnRelationship(relationship: Relationship, completionBlock: ((Result<Relationship, Error>) -> ())?) {
-        let client = self.getClient()
-        defer { release(client) }
-        client.updateAndReturnRelationship(relationship: relationship, completionBlock: completionBlock)
+        return client.updateAndReturnRelationship(relationship: relationship)
     }
     
     public func updateAndReturnRelationshipSync(relationship: Relationship) -> Result<Relationship, Error> {
@@ -399,16 +429,10 @@ extension BoltPoolClient {
         return client.updateAndReturnRelationshipSync(relationship: relationship)
     }
     
-    public func updateRelationship(relationship: Relationship, completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func updateRelationship(relationship: Relationship) -> EventLoopFuture<Void> {
         let client = self.getClient()
         defer { release(client) }
-        client.updateRelationship(relationship: relationship, completionBlock: completionBlock)
-    }
-    
-    public func performRequestWithNoReturnRelationship(request: Request, completionBlock: ((Result<Bool, Error>) -> ())?) {
-        let client = self.getClient()
-        defer { release(client) }
-        client.performRequestWithNoReturnRelationship(request: request, completionBlock: completionBlock)
+        return client.updateRelationship(relationship: relationship)
     }
     
     public func updateRelationshipSync(relationship: Relationship) -> Result<Bool, Error> {
@@ -417,10 +441,10 @@ extension BoltPoolClient {
         return client.updateRelationshipSync(relationship: relationship)
     }
     
-    public func deleteRelationship(relationship: Relationship, completionBlock: ((Result<Bool, Error>) -> ())?) {
+    public func deleteRelationship(relationship: Relationship) -> EventLoopFuture<Void> {
         let client = self.getClient()
         defer { release(client) }
-        client.deleteRelationship(relationship: relationship, completionBlock: completionBlock)
+        return client.deleteRelationship(relationship: relationship)
     }
     
     public func deleteRelationshipSync(relationship: Relationship) -> Result<Bool, Error> {
@@ -429,15 +453,15 @@ extension BoltPoolClient {
         return client.deleteRelationshipSync(relationship: relationship)
     }
     
-    public func relationshipsWith(type: String, andProperties properties: [String : PackProtocol], skip: UInt64, limit: UInt64, completionBlock: ((Result<[Relationship], Error>) -> ())?) {
+    public func relationshipsWith(type: String, andProperties properties: [String : PackProtocol], skip: UInt64, limit: UInt64) -> EventLoopFuture<[Relationship]> {
         let client = self.getClient()
         defer { release(client) }
-        return client.relationshipsWith(type: type, andProperties: properties, skip: skip, limit: limit, completionBlock: completionBlock)
+        return client.relationshipsWith(type: type, andProperties: properties, skip: skip, limit: limit)
     }
     
-    public func pullSynchronouslyAndIgnore() {
+    public func relationshipsWithSync(type: String, andProperties properties: [String:PackProtocol] = [:], skip: UInt64 = 0, limit: UInt64 = 25) -> Result<[Relationship], Error> {
         let client = self.getClient()
         defer { release(client) }
-        client.pullSynchronouslyAndIgnore()
+        return client.relationshipsWithSync(type: type, andProperties: properties, skip: skip, limit: limit)
     }
 }
