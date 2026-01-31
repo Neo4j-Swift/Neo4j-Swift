@@ -15,7 +15,12 @@ let TheoTimeoutInterval: TimeInterval = 10
 class ConfigLoader: NSObject {
 
     class func loadBoltConfig() -> BoltConfig {
+        // Try Bundle.module first (for Swift Package Manager)
+        if let bundleURL = Bundle.module.url(forResource: "TheoBoltConfig", withExtension: "json") {
+            return BoltConfig(pathToFile: bundleURL.path)
+        }
 
+        // Fallback to #file-based path (for Xcode projects)
         let testPath = URL(fileURLWithPath: #file)
             .deletingLastPathComponent().path
 

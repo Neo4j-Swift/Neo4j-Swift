@@ -21,6 +21,10 @@ let package = Package(
             dependencies: ["Bolt"]),
         .testTarget(
             name: "TheoTests",
-            dependencies: ["Theo"])
+            dependencies: ["Theo"],
+            resources: [
+                .copy("TheoBoltConfig.json"),
+                .copy("TestFixtures")
+            ])
     ]
 )

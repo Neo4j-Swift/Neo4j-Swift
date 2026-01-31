@@ -64,11 +64,16 @@ class TheoTestCase: XCTestCase {
             }
             client = try BoltClient(CustomConfig(configuration: configuration))
         } else { // .json || .any && %3 == 2
-            let testPath = URL(fileURLWithPath: #file)
-                .deletingLastPathComponent().path
-            let filePath = "\(testPath)/TheoBoltConfig.json"
-            let data = try Data(contentsOf: URL.init(fileURLWithPath: filePath))
-            
+            let fileURL: URL
+            if let bundleURL = Bundle.module.url(forResource: "TheoBoltConfig", withExtension: "json") {
+                fileURL = bundleURL
+            } else {
+                let testPath = URL(fileURLWithPath: #file)
+                    .deletingLastPathComponent().path
+                fileURL = URL(fileURLWithPath: "\(testPath)/TheoBoltConfig.json")
+            }
+            let data = try Data(contentsOf: fileURL)
+
             let json = try JSONSerialization.jsonObject(with: data) as! [String:Any]
             let jsonConfig = JSONClientConfiguration(json: json)
             client = try BoltClient(jsonConfig)
