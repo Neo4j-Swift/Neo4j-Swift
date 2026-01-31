@@ -324,6 +324,164 @@ final class NodeAndRelationshipTests: XCTestCase {
         XCTAssertNotNil(rel.toNodeId)
     }
 
+    // MARK: - Node Deserialization Tests (from Bolt protocol)
+
+    func testNodeDeserializationFromStructure() {
+        // Node structure: signature 78 (0x4E = 'N'), [id, labels, properties]
+        let labels = List(items: ["Person", "Employee"])
+        let properties = Map(dictionary: ["name": "Alice", "age": Int64(30)])
+        let nodeStructure = Structure(signature: 78, items: [Int64(12345), labels, properties])
+
+        let node = Node(data: nodeStructure)
+
+        XCTAssertNotNil(node)
+        XCTAssertEqual(node?.id, 12345)
+        XCTAssertEqual(node?.labels.count, 2)
+        XCTAssertTrue(node?.labels.contains("Person") ?? false)
+        XCTAssertTrue(node?.labels.contains("Employee") ?? false)
+        XCTAssertEqual(node?.properties["name"] as? String, "Alice")
+        XCTAssertEqual(node?.properties["age"] as? Int64, 30)
+    }
+
+    func testNodeDeserializationWithEmptyLabels() {
+        let labels = List(items: [])
+        let properties = Map(dictionary: ["key": "value"])
+        let nodeStructure = Structure(signature: 78, items: [Int64(1), labels, properties])
+
+        let node = Node(data: nodeStructure)
+
+        XCTAssertNotNil(node)
+        XCTAssertEqual(node?.id, 1)
+        XCTAssertTrue(node?.labels.isEmpty ?? false)
+    }
+
+    func testNodeDeserializationWithEmptyProperties() {
+        let labels = List(items: ["Test"])
+        let properties = Map(dictionary: [:])
+        let nodeStructure = Structure(signature: 78, items: [Int64(1), labels, properties])
+
+        let node = Node(data: nodeStructure)
+
+        XCTAssertNotNil(node)
+        XCTAssertTrue(node?.properties.isEmpty ?? false)
+    }
+
+    func testNodeDeserializationWithWrongSignature() {
+        let labels = List(items: ["Test"])
+        let properties = Map(dictionary: [:])
+        // Wrong signature (79 instead of 78)
+        let nodeStructure = Structure(signature: 79, items: [Int64(1), labels, properties])
+
+        let node = Node(data: nodeStructure)
+
+        XCTAssertNil(node)
+    }
+
+    func testNodeDeserializationWithInsufficientItems() {
+        // Only 2 items instead of 3
+        let labels = List(items: ["Test"])
+        let nodeStructure = Structure(signature: 78, items: [Int64(1), labels])
+
+        let node = Node(data: nodeStructure)
+
+        XCTAssertNil(node)
+    }
+
+    func testNodeDeserializationFromNonStructure() {
+        let node = Node(data: "not a structure")
+
+        XCTAssertNil(node)
+    }
+
+    func testNodeDeserializationWithInt64Id() {
+        let labels = List(items: ["Test"])
+        let properties = Map(dictionary: [:])
+        // Use Int64 which can be converted to UInt64
+        let nodeStructure = Structure(signature: 78, items: [Int64(999), labels, properties])
+
+        let node = Node(data: nodeStructure)
+
+        XCTAssertNotNil(node)
+        XCTAssertEqual(node?.id, 999)
+    }
+
+    // MARK: - Relationship Deserialization Tests (from Bolt protocol)
+
+    func testRelationshipDeserializationFromStructure() {
+        // Relationship structure: signature 82 (0x52 = 'R'), [id, startNodeId, endNodeId, type, properties]
+        let properties = Map(dictionary: ["since": Int64(2020)])
+        let relStructure = Structure(signature: 82, items: [
+            Int64(100),      // relationship id
+            Int64(1),        // start node id
+            Int64(2),        // end node id
+            "KNOWS",         // type
+            properties       // properties
+        ])
+
+        let relationship = Relationship(data: relStructure)
+
+        XCTAssertNotNil(relationship)
+        XCTAssertEqual(relationship?.id, 100)
+        XCTAssertEqual(relationship?.fromNodeId, 1)
+        XCTAssertEqual(relationship?.toNodeId, 2)
+        XCTAssertEqual(relationship?.type, "KNOWS")
+        XCTAssertEqual(relationship?.properties["since"] as? Int64, 2020)
+    }
+
+    func testRelationshipDeserializationWithEmptyProperties() {
+        let properties = Map(dictionary: [:])
+        let relStructure = Structure(signature: 82, items: [
+            Int64(1), Int64(10), Int64(20), "FOLLOWS", properties
+        ])
+
+        let relationship = Relationship(data: relStructure)
+
+        XCTAssertNotNil(relationship)
+        XCTAssertTrue(relationship?.properties.isEmpty ?? false)
+    }
+
+    func testRelationshipDeserializationWithWrongSignature() {
+        let properties = Map(dictionary: [:])
+        // Wrong signature (83 instead of 82)
+        let relStructure = Structure(signature: 83, items: [
+            Int64(1), Int64(10), Int64(20), "FOLLOWS", properties
+        ])
+
+        let relationship = Relationship(data: relStructure)
+
+        XCTAssertNil(relationship)
+    }
+
+    func testRelationshipDeserializationWithInsufficientItems() {
+        // Only 4 items instead of 5
+        let relStructure = Structure(signature: 82, items: [
+            Int64(1), Int64(10), Int64(20), "FOLLOWS"
+        ])
+
+        let relationship = Relationship(data: relStructure)
+
+        XCTAssertNil(relationship)
+    }
+
+    func testRelationshipDeserializationFromNonStructure() {
+        let relationship = Relationship(data: "not a structure")
+
+        XCTAssertNil(relationship)
+    }
+
+    func testRelationshipDeserializationDefaultDirection() {
+        let properties = Map(dictionary: [:])
+        let relStructure = Structure(signature: 82, items: [
+            Int64(1), Int64(10), Int64(20), "LINKS", properties
+        ])
+
+        let relationship = Relationship(data: relStructure)
+
+        XCTAssertNotNil(relationship)
+        // Default direction should be .from when deserializing
+        XCTAssertEqual(relationship?.direction, .from)
+    }
+
     // MARK: - Edge Cases
 
     func testNodeWithEmptyLabel() {
@@ -395,6 +553,21 @@ final class NodeAndRelationshipTests: XCTestCase {
             ("testNodeCreateCypher", testNodeCreateCypher),
             ("testNodeMatchCypher", testNodeMatchCypher),
             ("testRelationshipCreateCypher", testRelationshipCreateCypher),
+            // Deserialization tests
+            ("testNodeDeserializationFromStructure", testNodeDeserializationFromStructure),
+            ("testNodeDeserializationWithEmptyLabels", testNodeDeserializationWithEmptyLabels),
+            ("testNodeDeserializationWithEmptyProperties", testNodeDeserializationWithEmptyProperties),
+            ("testNodeDeserializationWithWrongSignature", testNodeDeserializationWithWrongSignature),
+            ("testNodeDeserializationWithInsufficientItems", testNodeDeserializationWithInsufficientItems),
+            ("testNodeDeserializationFromNonStructure", testNodeDeserializationFromNonStructure),
+            ("testNodeDeserializationWithInt64Id", testNodeDeserializationWithInt64Id),
+            ("testRelationshipDeserializationFromStructure", testRelationshipDeserializationFromStructure),
+            ("testRelationshipDeserializationWithEmptyProperties", testRelationshipDeserializationWithEmptyProperties),
+            ("testRelationshipDeserializationWithWrongSignature", testRelationshipDeserializationWithWrongSignature),
+            ("testRelationshipDeserializationWithInsufficientItems", testRelationshipDeserializationWithInsufficientItems),
+            ("testRelationshipDeserializationFromNonStructure", testRelationshipDeserializationFromNonStructure),
+            ("testRelationshipDeserializationDefaultDirection", testRelationshipDeserializationDefaultDirection),
+            // Edge cases
             ("testNodeWithEmptyLabel", testNodeWithEmptyLabel),
             ("testNodeWithUnicodeLabel", testNodeWithUnicodeLabel),
             ("testRelationshipWithUnicodeType", testRelationshipWithUnicodeType),
