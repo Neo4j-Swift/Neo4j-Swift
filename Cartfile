@@ -1,4 +1,0 @@
-github "Neo4j-Swift/Bolt-swift" ~> 1.0.1
-github "Neo4j-Swift/PackStream-Swift" ~> 1.0.1
-github "IBM-Swift/BlueSocket" ~> 0.12.94
-github "IBM-Swift/BlueSSLService" ~> 0.12.84

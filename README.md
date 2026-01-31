@@ -9,54 +9,28 @@
 
 * CRUD operations for Nodes and Relationships
 * Transaction statement execution
-* Supports iOS, tvOS, macOS and Linux
+* Supports iOS, tvOS, macOS, watchOS and Linux
 
 ## Requirements
 
-* iOS 12.2 or higher / macOS 10.14 or higher / Ubuntu Linux 16.04 or higher 
-* Xcode 10.2.1 or newer for iOS or macOS
-* Swift 5.0
+* macOS 14+ / iOS 17+ / tvOS 17+ / watchOS 10+ / Linux
+* Swift 6.0+
 
 ## Feedback
 
-Because this framework is open source it is best for most situations to post on Stack Overflow and tag it **[Theo](http://stackoverflow.com/questions/tagged/neo4j-swift)**. If you do 
+Because this framework is open source it is best for most situations to post on Stack Overflow and tag it **[Theo](http://stackoverflow.com/questions/tagged/neo4j-swift)**. If you do
 find a bug please file an issue or issue a PR for any features or fixes.
 You are also most welcome to join the conversation in the #neo4j-swift channel in the [neo4j-users Slack](http://neo4j-users-slack-invite.herokuapp.com)
 
 ## Installation
-You can install Theo in a number of ways
 
 ### Swift Package Manager
 Add the following line to your Package dependencies array:
 
 ```swift
-.package(url: "https://github.com/Neo4j-Swift/Neo4j-Swift.git", from: "5.0.0")
+.package(url: "https://github.com/Neo4j-Swift/Neo4j-Swift.git", from: "6.0.0")
 ```
 Run `swift build` to build your project, now with Theo included and ready to be used from your source
-
-### CococaPods
-Add the following to your Podfile:
-
-```ruby
-source 'https://github.com/CocoaPods/Specs.git'
-platform :ios, ‘12.2’
-use_frameworks!
-
-target '<Your Target Name>' do
-  pod ‘Theo’
-end
-```
-Run `pod install` to configure your updated workspace. Open the .xcworkspace generated, your project is now ready to use Theo
-
-### git submodule
-
-  1. Add it as a submodule to your existing project. `git submodule add git@github.com:Neo4j-Swift/Neo4j-Swift.git`
-  2. Through Terminal, navigate to the submodule directory and run `swift package fetch`. Theo has other dependencies and they need to be fetched.
-  3. Open the Theo folder, and drag Theo.xcodeproj into the file navigator of your Xcode project.
-  4. In Xcode, navigate to the target configuration window by clicking on the blue project icon, and selecting the application target under the "Targets" heading in the sidebar.
-  5. In the tab bar at the top of that window, open the "Build Phases" panel.
-  6. Expand the "Link Binary with Libraries" group, Copy Frameworks and add Theo.framework, Bolt.framework, SSLService.framework, Socket.framework, PacketStream.framework.
-  7. Click on the + button at the top left of the panel and select "New Copy Files Phase". Rename this new phase to "Copy Frameworks", set the "Destination" to "Frameworks", and add the frameworks.
 
 ## Usage
 If you prefer just code-examples to get started, check out [theo-example](https://github.com/Neo4j-Swift/theo-example) that is updated to match the current version of Theo.
@@ -276,9 +250,9 @@ In the example above, we already executed a few cypher queries. In the following
 
 ```swift
 let query = """
-            MATCH (u:User {username: {user} }) WITH u 
-            MATCH (u)-[:FOLLOWS*0..1]->(f) WITH DISTINCT f,u 
-            MATCH (f)-[:LASTPOST]-(lp)-[:NEXTPOST*0..3]-(p) 
+            MATCH (u:User {username: {user} }) WITH u
+            MATCH (u)-[:FOLLOWS*0..1]->(f) WITH DISTINCT f,u
+            MATCH (f)-[:LASTPOST]-(lp)-[:NEXTPOST*0..3]-(p)
             RETURN p.contentId as contentId, p.title as title, p.tagstr as tagstr, p.timestamp as timestamp, p.url as url, f.username as username, f=u as owner
             """
 let params: [String:PackProtocol] = ["user": "ajordan"]
@@ -303,7 +277,7 @@ There is a file called, `TheoBoltConfig.json.example` which you should copy to `
 
 ## Authors
 
-* [Niklas Saers](http://niklas.saers.com/) ([@niklassaers](https://twitter.com/niklassaers)) (Theo v3-v5)
+* [Niklas Saers](http://niklas.saers.com/) ([@niklassaers](https://twitter.com/niklassaers)) (Theo v3-v6)
 * [Cory Wiles](http://www.corywiles.com/) ([@kwylez](https://twitter.com/kwylez)) (Theo v1-v3)
 
 ## Special thanks to
