@@ -165,7 +165,7 @@ extension BoltPoolClient {
         return client.executeCypherSync(query, params: params)
     }
     
-    public func executeAsTransaction(mode: Request.TransactionMode = .readonly, bookmark: String?, transactionBlock: @escaping (Transaction) throws -> (), transactionCompleteBlock: ((Bool) -> ())? = nil) throws {
+    public func executeAsTransaction(mode: TransactionMode = .readonly, bookmark: String?, transactionBlock: @escaping (Transaction) throws -> (), transactionCompleteBlock: ((Bool) -> ())? = nil) throws {
         let client = self.getClient()
         defer { release(client) }
         try client.executeAsTransaction(mode: mode, bookmark: bookmark, transactionBlock: transactionBlock, transactionCompleteBlock: transactionCompleteBlock)

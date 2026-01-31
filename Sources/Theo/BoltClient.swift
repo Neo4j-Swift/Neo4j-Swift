@@ -1,7 +1,7 @@
 import Foundation
 import PackStream
 import Bolt
-import NIO
+import NIOCore
 
 #if os(Linux)
 import Dispatch
@@ -9,7 +9,14 @@ import Dispatch
 
 typealias BoltRequest = Bolt.Request
 
-open class BoltClient: ClientProtocol {
+// MARK: - Sendable Box for sync methods
+// Helper class to safely capture mutable state across concurrency boundaries
+private final class SendableBox<T>: @unchecked Sendable {
+    var value: T
+    init(_ value: T) { self.value = value }
+}
+
+open class BoltClient: ClientProtocol, @unchecked Sendable {
     private let hostname: String
     private let port: Int
     private let username: String
@@ -72,16 +79,18 @@ open class BoltClient: ClientProtocol {
      - parameter completionBlock: Completion result-block that provides a Bool to indicate success, or an Error to explain what went wrong
      */
     public func connect(completionBlock: ((Result<Bool, Error>) -> ())? = nil) {
+        // Wrap completion block for Sendable compatibility
+        let callbackBox = SendableBox<((Result<Bool, Error>) -> ())?>(completionBlock)
 
         do {
             try self.connection.connect { (error) in
                 if let error = error {
-                    completionBlock?(.failure(error))
+                    callbackBox.value?(.failure(error))
                 } else {
-                    completionBlock?(.success(true))
+                    callbackBox.value?(.success(true))
                 }
             }
-        } catch let error as Connection.ConnectionError {
+        } catch let error as BoltError {
             completionBlock?(.failure(error))
         } catch let error {
             print("Unknown error while connecting: \(error.localizedDescription)")
@@ -153,12 +162,12 @@ open class BoltClient: ClientProtocol {
             }
             
 
-        } catch let error as Response.ResponseError {
+        } catch let error as BoltError {
             completionBlock?(.failure(error))
         } catch let error {
             print("Unhandled error while executing cypher: \(error.localizedDescription)")
         }
-        
+
     }
 
     /**
@@ -219,7 +228,7 @@ open class BoltClient: ClientProtocol {
             promise.whenFailure { (error) in
                 completionBlock?(.failure(BoltClientError.queryUnsuccessful))
             }
-        } catch let error as Response.ResponseError {
+        } catch let error as BoltError {
             completionBlock?(.failure(error))
         } catch let error {
             print("Unhandled error while executing cypher: \(error.localizedDescription)")
@@ -277,49 +286,49 @@ open class BoltClient: ClientProtocol {
     @discardableResult
     public func executeCypherSync(_ query: String, params: Dictionary<String,PackProtocol>? = nil) -> (Result<QueryResult, Error>) {
 
-        var theResult: Result<QueryResult, Error>! = nil
+        let resultBox = SendableBox<Result<QueryResult, Error>?>(nil)
+        let partialResultBox = SendableBox<QueryResult>(QueryResult())
         let dispatchGroup = DispatchGroup()
 
         // Perform query
         dispatchGroup.enter()
-        var partialResult = QueryResult()
         DispatchQueue.global(qos: .background).async {
             self.executeCypher(query, params: params) { result in
                 switch result {
                 case let .failure(error):
                     print("Error: \(error)")
-                    theResult = .failure(error)
+                    resultBox.value = .failure(error)
                 case let .success((isSuccess, _partialResult)):
                     if isSuccess == false {
                         let error = BoltClientError.queryUnsuccessful
-                        theResult = .failure(error)
+                        resultBox.value = .failure(error)
                     } else {
-                        theResult = .success(_partialResult) // TODO: hack for now
-                        partialResult = _partialResult
+                        resultBox.value = .success(_partialResult)
+                        partialResultBox.value = _partialResult
                     }
                 }
                 dispatchGroup.leave()
             }
         }
         dispatchGroup.wait()
-        if theResult != nil {
-            return theResult
+        if let result = resultBox.value {
+            return result
         }
 
         // Stream and parse results
         dispatchGroup.enter()
         DispatchQueue.global(qos: .background).async {
-            self.pullAll(partialQueryResult: partialResult) { result in
+            self.pullAll(partialQueryResult: partialResultBox.value) { result in
                 switch result {
                 case let .failure(error):
                     print("Error: \(error)")
-                    theResult = .failure(error)
+                    resultBox.value = .failure(error)
                 case let .success(isSuccess, parsedResponses):
                     if isSuccess == false {
                         let error = BoltClientError.queryUnsuccessful
-                        theResult = .failure(error)
+                        resultBox.value = .failure(error)
                     } else {
-                        theResult = .success(parsedResponses)
+                        resultBox.value = .success(parsedResponses)
                     }
                 }
                 dispatchGroup.leave()
@@ -327,7 +336,7 @@ open class BoltClient: ClientProtocol {
         }
 
         dispatchGroup.wait()
-        return theResult
+        return resultBox.value ?? .failure(BoltClientError.unknownError)
     }
 
 
@@ -466,7 +475,7 @@ open class BoltClient: ClientProtocol {
      - parameter bookamrk: If a transaction bookmark has been given, the Neo4j node will wait until it has received a transaction with that bookmark before this transaction is run. This ensures that in a multi-node setup, the expected queries have been run before this set is.
      - parameter transactionBlock: The block of queries and result processing that make up the transaction. The Transaction object is available to it, so that it can mark it as failed, disable autocommit (on by default), or, after the transaction has been completed, get the transaction bookmark.
      */
-    public func executeAsTransaction(mode: Request.TransactionMode = .readonly, bookmark: String? = nil, transactionBlock: @escaping (_ tx: Transaction) throws -> (), transactionCompleteBlock: ((Bool) -> ())? = nil) throws {
+    public func executeAsTransaction(mode: TransactionMode = .readonly, bookmark: String? = nil, transactionBlock: @escaping (_ tx: Transaction) throws -> (), transactionCompleteBlock: ((Bool) -> ())? = nil) throws {
 
         let transaction = Transaction()
         transaction.commitBlock = { succeed in
@@ -967,17 +976,17 @@ extension BoltClient { // Node functions
         let group = DispatchGroup()
         group.enter()
 
-        var theResult: Result<Bool, Error> = .failure(BoltClientError.unknownError)
+        let resultBox = SendableBox<Result<Bool, Error>>(.failure(BoltClientError.unknownError))
         DispatchQueue.global(qos: .background).async {
             self.updateNodes(nodes: nodes) { result in
-                theResult = result
+                resultBox.value = result
                 self.pullSynchronouslyAndIgnore()
                 group.leave()
             }
         }
-        
+
         group.wait()
-        return theResult
+        return resultBox.value
     }
 
     //MARK: Delete

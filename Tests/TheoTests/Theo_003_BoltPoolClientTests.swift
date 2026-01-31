@@ -3,8 +3,8 @@ import XCTest
 @testable import Theo
 
 class Theo_003_BoltPoolClientTests: Theo_000_BoltClientTests {
-    
-    static var pool: BoltPoolClient!
+
+    nonisolated(unsafe) static var pool: BoltPoolClient!
     var clientForSuperclass: ClientProtocol!
     
     override static func setUp() {

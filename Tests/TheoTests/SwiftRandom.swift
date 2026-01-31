@@ -223,14 +223,14 @@ public struct Randoms {
         return currencyList.randomElement()!
     }
     
-    public enum GravatarStyle: String {
+    public enum GravatarStyle: String, Sendable {
         case Standard
         case MM
         case Identicon
         case MonsterID
         case Wavatar
         case Retro
-        
+
         static let allValues = [Standard, MM, Identicon, MonsterID, Wavatar, Retro]
     }
     

@@ -1,7 +1,8 @@
 import Foundation
 import XCTest
 import PackStream
-import NIO
+import NIOCore
+import NIOPosix
 
 @testable import Theo
 
@@ -25,10 +26,11 @@ class ConfigLoader: NSObject {
 
 }
 
-class Theo_000_BoltClientTests: TheoTestCase {
-    
-    static let configuration: ClientConfigurationProtocol = ConfigLoader.loadBoltConfig()
-    static var runCount: Int = 0
+// Marked @unchecked Sendable for Swift 6 - test classes manage their own synchronization
+class Theo_000_BoltClientTests: TheoTestCase, @unchecked Sendable {
+
+    nonisolated(unsafe) static let configuration: ClientConfigurationProtocol = ConfigLoader.loadBoltConfig()
+    nonisolated(unsafe) static var runCount: Int = 0
 
     var eventLoopGroup: MultiThreadedEventLoopGroup! = nil
 
@@ -507,20 +509,22 @@ class Theo_000_BoltClientTests: TheoTestCase {
 
         let figureOutNumberOfKingArthurs = DispatchGroup()
         figureOutNumberOfKingArthurs.enter()
-        var numberOfKingArthurs = -1
+        // Use a thread-safe box for Swift 6 Sendable compliance
+        final class Box<T>: @unchecked Sendable { var value: T; init(_ v: T) { value = v } }
+        let numberOfKingArthursBox = Box(-1)
 
         DispatchQueue.global(qos: .background).async {
             client.executeCypher("MATCH (a:Person) WHERE a.name = $name RETURN count(a) AS count", params: ["name": "Arthur"])  { result in
-                
+
                 XCTAssertTrue(result.isSuccess)
                 guard case let Result.success(value) = result else {
                     XCTFail()
                     figureOutNumberOfKingArthurs.leave()
                     return
                 }
-                
+
                 XCTAssertTrue(value.0)
-                
+
                 switch result {
                 case .failure:
                     XCTFail("Failed to pull response data")
@@ -532,21 +536,22 @@ class Theo_000_BoltClientTests: TheoTestCase {
                     XCTAssertEqual(0, queryResult.relationships.count)
                     XCTAssertEqual(0, queryResult.paths.count)
                     XCTAssertEqual(1, queryResult.fields.count)
-                    
+
                     if let numberOfKingArthursRI = queryResult.rows.first?["count"],
                         let numberOfKingArthurS64 = numberOfKingArthursRI as? UInt64 {
-                        numberOfKingArthurs = Int(truncatingIfNeeded: numberOfKingArthurS64)
+                        numberOfKingArthursBox.value = Int(truncatingIfNeeded: numberOfKingArthurS64)
                     } else {
                         XCTFail("Could not get count and make it an Int")
                     }
-                    
-                    XCTAssertGreaterThanOrEqual(0, numberOfKingArthurs)
-                    
+
+                    XCTAssertGreaterThanOrEqual(0, numberOfKingArthursBox.value)
+
                     figureOutNumberOfKingArthurs.leave()
                 }
             }
         }
         figureOutNumberOfKingArthurs.wait()
+        let numberOfKingArthurs = numberOfKingArthursBox.value
         XCTAssertNotEqual(-1, numberOfKingArthurs)
 
         // Now lets run the actual test
@@ -2639,7 +2644,7 @@ CREATE (bb)-[:HAS_ALCOHOLPERCENTAGE]->(ap),
         }
     }
 
-    static var allTests = [
+    nonisolated(unsafe) static var allTests = [
         ("testBreweryDataset", testBreweryDataset),
         ("testCancellingTransaction", testCancellingTransaction),
         ("testCreateAndDeleteNode", testCreateAndDeleteNode),

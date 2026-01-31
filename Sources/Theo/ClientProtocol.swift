@@ -2,18 +2,18 @@ import Foundation
 import Bolt
 import PackStream
 
-public protocol ClientProtocol: class {
+public protocol ClientProtocol: AnyObject {
     func connect(completionBlock: ((Result<Bool, Error>) -> ())?)
     func connectSync() -> Result<Bool, Error>
     func disconnect()
     func execute(request: Request, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())?)
     func executeWithResult(request: Request, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())?)
     func executeCypherWithResult(_ query: String, params: [String:PackProtocol], completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())?)
-    
+
     func executeCypher(_ query: String, params: Dictionary<String,PackProtocol>?, completionBlock: ((Result<(Bool, QueryResult), Error>) -> ())?)
     func executeCypherSync(_ query: String, params: Dictionary<String,PackProtocol>?) -> (Result<QueryResult, Error>)
-    
-    func executeAsTransaction(mode: Request.TransactionMode, bookmark: String?, transactionBlock: @escaping (_ tx: Transaction) throws -> (), transactionCompleteBlock: ((Bool) -> ())?) throws
+
+    func executeAsTransaction(mode: TransactionMode, bookmark: String?, transactionBlock: @escaping (_ tx: Transaction) throws -> (), transactionCompleteBlock: ((Bool) -> ())?) throws
     func reset(completionBlock: (() -> ())?) throws
     func resetSync() throws
     func rollback(transaction: Transaction, rollbackCompleteBlock: (() -> ())?) throws
