@@ -44,10 +44,16 @@ open class BoltClient: ClientProtocol, @unchecked Sendable {
         self.password = configuration.password
         self.encrypted = configuration.encrypted
 
-        let settings = ConnectionSettings(username: self.username, password: self.password, userAgent: "Theo 5.2.0")
+        let settings = ConnectionSettings(username: self.username, password: self.password, userAgent: "Theo 6.0.2")
 
-        let socket = try EncryptedSocket(hostname: hostname, port: port)
-        socket.certificateValidator = UnsecureCertificateValidator(hostname: self.hostname, port: UInt(self.port))
+        let socket: SocketProtocol
+        if self.encrypted {
+            let encryptedSocket = try EncryptedSocket(hostname: hostname, port: port)
+            encryptedSocket.certificateValidator = UnsecureCertificateValidator(hostname: self.hostname, port: UInt(self.port))
+            socket = encryptedSocket
+        } else {
+            socket = try UnencryptedSocket(hostname: hostname, port: port)
+        }
         self.connection = Connection(
             socket: socket,
             settings: settings)
@@ -61,10 +67,16 @@ open class BoltClient: ClientProtocol, @unchecked Sendable {
         self.password = password
         self.encrypted = encrypted
 
-        let settings = ConnectionSettings(username: username, password: password, userAgent: "Theo 5.2.0")
+        let settings = ConnectionSettings(username: username, password: password, userAgent: "Theo 6.0.2")
 
-        let socket = try EncryptedSocket(hostname: hostname, port: port)
-        socket.certificateValidator = UnsecureCertificateValidator(hostname: self.hostname, port: UInt(self.port))
+        let socket: SocketProtocol
+        if encrypted {
+            let encryptedSocket = try EncryptedSocket(hostname: hostname, port: port)
+            encryptedSocket.certificateValidator = UnsecureCertificateValidator(hostname: self.hostname, port: UInt(self.port))
+            socket = encryptedSocket
+        } else {
+            socket = try UnencryptedSocket(hostname: hostname, port: port)
+        }
         self.connection = Connection(
             socket: socket,
             settings: settings)
