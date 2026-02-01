@@ -55,51 +55,34 @@ let client = try BoltClient(hostname: "localhost",
 ```
 
 
-### Create and save a  node
+### Create and save a node
 
 ```swift
 // Create the node
 let node = Node(label: "Character", properties: ["name": "Thomas Anderson", "alias": "Neo" ])
 
 // Save the node
-let result = client.createNodeSync(node: node)
-
-// Verify the result of the save
-switch result {
-case let .failure(error):
-  print(error.localizedDescription)
-case .success(_):
-  print("Node saved successfully")
+do {
+    try await client.createNode(node: node)
+    print("Node saved successfully")
+} catch {
+    print(error.localizedDescription)
 }
 ```
 
-createNodeSync() above has an async sibling createNode(), and they in turn have siblings that return the created node: createAndReturnNode() and creaetAndReturnNodeSync(). Finally, multiple nodes can be created at the same time, giving you the functions createNodes(), createNodesSync(), createAndReturnNodes() and createAndReturnNodesSync() to choose between.
+There's also `createAndReturnNode()` if you need the created node back, and `createNodes()` / `createAndReturnNodes()` for creating multiple nodes at once. Sync variants are available for all methods (e.g., `createNodeSync()`).
 
 ### Fetch a node via id
 
 ```swift
-client.nodeBy(id: 42) { result in
-  switch result {
-  case let .failure(error):
-    print(error.localizedDescription)
-  case let .success(foundNode):
-    if let foundNode = foundNode {
-	  print("Successfully found node \(foundNode)")
+do {
+    if let foundNode = try await client.nodeBy(id: 42) {
+        print("Successfully found node \(foundNode)")
     } else {
-	  print("There was no node with id 42")
-	}
-  }
-}
-```
-
-So, finding the node with id 42 is easy, but there is a little routine work in handling that there could be an error with connecting to the database, or there might not be a node with id 42.
-
-Living dangerously and ignoring both error scenarios would look like this:
-
-```swift
-client.nodeBy(id: 42) { result in
-  let foundNode = result.value!!
-  print("Successfully found node \(foundNode)")
+        print("There was no node with id 42")
+    }
+} catch {
+    print(error.localizedDescription)
 }
 ```
 
@@ -120,12 +103,11 @@ and then
 
 
 ```swift
-let result = client.updateNodeSync(node: node)
-switch result {
-case let .failure(error):
-  print(error.localizedDescription)
-case .success(_):
-  print("Node updated successfully")
+do {
+    try await client.updateNode(node: node)
+    print("Node updated successfully")
+} catch {
+    print(error.localizedDescription)
 }
 ```
 
@@ -135,12 +117,11 @@ Likewise, given the variable 'node' with an existing node, when we no longer wan
 we might want to delete it all together:
 
 ```swift
-let result = client.deleteNodeSync(node: node)
-switch result {
-case let .failure(error):
-  print(error.localizedDescription)
-case .success(_):
-  print("Node deleted successfully")
+do {
+    try await client.deleteNode(node: node)
+    print("Node deleted successfully")
+} catch {
+    print(error.localizedDescription)
 }
 ```
 
@@ -149,16 +130,17 @@ Note that in Neo4j, to delete a node all relationships this node participates in
 ```swift
 guard let id = node.id else { return }
 let query = """
-            MATCH (n) WHERE id(n) = {id} DETACH DELETE n
+            MATCH (n) WHERE id(n) = $id DETACH DELETE n
             """
-if client.executeCypherSync(query, params: [ "id": Int64(id)] ).isSuccess {
-  print("Node deleted successfully")
-} else {
-  print("Something went wrong while deleting the node")
+do {
+    try await client.executeCypher(query, params: ["id": Int64(id)])
+    print("Node deleted successfully")
+} catch {
+    print("Something went wrong while deleting the node")
 }
 ```
 
-### Fetch nodes matching a labels and property values
+### Fetch nodes matching labels and property values
 
 ```swift
 let labels = ["Father", "Husband"]
@@ -167,81 +149,59 @@ let properties: [String:PackProtocol] = [
     "age": 38
 ]
 
-client.nodesWith(labels: labels, andProperties: properties) { result in
-  print("Found \(result.value?.count ?? 0) nodes")
-}
-
+let nodes = try await client.nodesWith(labels: labels, andProperties: properties)
+print("Found \(nodes.count) nodes")
 ```
 
 ### Create a relationship
-Given two nodes reader and writer, making a relationship with the type "follows" is easy as
+Given two nodes reader and writer, making a relationship with the type "follows" is easy:
 
 ```swift
-let result = client.relateSync(node: reader, to: writer, type: "follows")
-if result.isSuccess {
-  print("Relationship successfully created")
-}
+try await client.relate(node: reader, to: writer, type: "follows")
+print("Relationship successfully created")
 ```
 
-Again, there is an async version of relateSync() called relate() that takes the same parameters and a callback block with the same result as relateSync returned
-
-You can also make a relationship directly and create that:
+You can also create a relationship object directly:
 
 ```swift
 let relationship = Relationship(fromNode: from, toNode: to, type: "Married to")
-client.createAndReturnRelationship(relationship: relationship) { result in
-  switch result {
-  case let .failure(error):
-    print(error.localizedDescription)
-  case let .success(relationship):
-    print("Successfully created relationship \(relationship)")
-  }
-}
+let created = try await client.createAndReturnRelationship(relationship: relationship)
+print("Successfully created relationship \(created)")
 ```
 
-Do note that if one or both of the nodes in a relationship have not been created in advance, they will be created together with the relationship
+Note that if one or both of the nodes in a relationship have not been created in advance, they will be created together with the relationship.
 
 ### Updating properties on a relationship
 
-Having fetched a relationship as part of a query, you can now edit properties on that relationship:
+Having fetched a relationship as part of a query, you can edit properties on that relationship:
 
 ```swift
 relationship["someKey"] = "someValue"
 relationship["otherKey"] = 42
-let result = client.updateAndReturnRelationshipSync(relationship: relationship)
-switch result {
-case let .failure(error):
-  print(error.localizedDescription)
-case let .success(relationship):
-  print("Successfully updated relationship \(relationship)")
-}
+let updated = try await client.updateAndReturnRelationship(relationship: relationship)
+print("Successfully updated relationship \(updated)")
 ```
 
 ### Deleting a relationship
 
-And finally, you can remove the relationship alltogether:
+And finally, you can remove the relationship altogether:
 
 ```swift
-let result = client.deleteRelationshipSync(relationship: relationship)
-switch result {
-case let .failure(error):
-  print(error.localizedDescription)
-case .success(_):
-  print("Successfully deleted the relationship")
-}
+try await client.deleteRelationship(relationship: relationship)
+print("Successfully deleted the relationship")
 ```
 
 ### Execute a transaction
-It is easy to make a transaction, and to roll it back if you are not happy with its results. Simply call executeAsTransaction() and pass in a block. This block has a parameter, tx in the example below, where you can invalidate the transaction at any point. If it has not been invalidated, it is considered successful and committed at the end of the transaction block.
+Transactions allow you to run multiple operations atomically and roll back if something goes wrong:
 
 ```swift
-try client.executeAsTransaction() { tx in
-  client.executeCypherSync("MATCH (n) SET n.abra = \"kadabra\"")
-  client.executeCypherSync("MATCH (n:Person) WHERE n.name = 'Guy' SET n.likeable = true")
-  let finalResult = client.executeCypherSync("MATCH (n:Person) WHERE n.name = 'Guy' AND n.abra='kadabra' SET n.starRating = 5")
-  if (finalResult.value?.stats.propertiesSetCount ?? 0) == 0 {
-	tx.markAsFailed()
-  }
+try await client.executeAsTransaction { tx in
+    try await client.executeCypher("MATCH (n) SET n.abra = 'kadabra'")
+    try await client.executeCypher("MATCH (n:Person) WHERE n.name = 'Guy' SET n.likeable = true")
+    let result = try await client.executeCypher("MATCH (n:Person) WHERE n.name = 'Guy' AND n.abra='kadabra' SET n.starRating = 5")
+    if (result.stats.propertiesSetCount) == 0 {
+        tx.markAsFailed()
+    }
 }
 ```
 
@@ -250,17 +210,17 @@ In the example above, we already executed a few cypher queries. In the following
 
 ```swift
 let query = """
-            MATCH (u:User {username: {user} }) WITH u
+            MATCH (u:User {username: $user }) WITH u
             MATCH (u)-[:FOLLOWS*0..1]->(f) WITH DISTINCT f,u
             MATCH (f)-[:LASTPOST]-(lp)-[:NEXTPOST*0..3]-(p)
             RETURN p.contentId as contentId, p.title as title, p.tagstr as tagstr, p.timestamp as timestamp, p.url as url, f.username as username, f=u as owner
             """
 let params: [String:PackProtocol] = ["user": "ajordan"]
-let result = client.executeCypherSync(query, params: params)
-if result.isSuccess {
-  print("Successfully ran query")
-} else {
-  print("Got an error")
+do {
+    let result = try await client.executeCypher(query, params: params)
+    print("Successfully ran query with \(result.rows.count) rows")
+} catch {
+    print("Got an error: \(error)")
 }
 ```
 
