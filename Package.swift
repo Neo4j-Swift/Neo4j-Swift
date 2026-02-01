@@ -13,7 +13,7 @@ let package = Package(
         .library(name: "Theo", targets: ["Theo"])
     ],
     dependencies: [
-        .package(url: "https://github.com/Neo4j-Swift/Bolt-swift.git", from: "6.0.0")
+        .package(url: "https://github.com/Neo4j-Swift/Bolt-swift.git", from: "6.0.1")
     ],
     targets: [
         .target(
