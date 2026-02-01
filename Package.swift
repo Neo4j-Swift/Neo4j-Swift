@@ -18,7 +18,7 @@ let package = Package(
     targets: [
         .target(
             name: "Theo",
-            dependencies: ["Bolt"]),
+            dependencies: [.product(name: "Bolt", package: "Bolt-swift")]),
         .testTarget(
             name: "TheoTests",
             dependencies: ["Theo"],
